@@ -2,6 +2,65 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.27.0](https://github.com/grumbach/self_encryption/compare/v0.26.2...v0.27.0) (2024-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* This PR alters the API
+* the parameter is changed on public methods.
+* this will affect current chunked data
+* correct max chunk size to 500kiB
+* reducing the max chunk size from 1MB to 500kB
+* Public API changes as SecretKey is renamed to DataMap.
+
+### Features
+
+* version bump and fmt ([b65d196](https://github.com/grumbach/self_encryption/commit/b65d196fd856c8156bfae0aecc92326cde27289e))
+* **data_map:** Add hierarchical data map shrinking and expansion ([b80f1cd](https://github.com/grumbach/self_encryption/commit/b80f1cd5c3c0a0468377a0330c6b4bb1b8f76c1b))
+* **hierarchical:** Add hierarchical data maps and flexible storage backends ([92895a5](https://github.com/grumbach/self_encryption/commit/92895a54299bdab8a9097b6f49576eb97dadfc3c))
+* add optional child field to DataMap ([69071c1](https://github.com/grumbach/self_encryption/commit/69071c1db0a52f30c9ba9d39ce8337a0fb152b0a))
+* add python bindings using PyO3 ([b39f875](https://github.com/grumbach/self_encryption/commit/b39f875f9469c047eaf0a92e346bac5373b6abd7))
+* allow compile time override of MAX_CHUNK_SIZE ([1a4334f](https://github.com/grumbach/self_encryption/commit/1a4334f2d1c313d56363be578dcdad92ff8466c4))
+* encrypt from file ([b7f0a38](https://github.com/grumbach/self_encryption/commit/b7f0a384eff22382da8418b239adcb2bf2d0f086))
+* encrypt/decrypt to/from disk files ([d585909](https://github.com/grumbach/self_encryption/commit/d5859091c648fdcfbf0b09dcb44da577c76bfab6))
+* PYPI Token ([50fb896](https://github.com/grumbach/self_encryption/commit/50fb89651bc4f056d3a93bd902b0438d93dbbab0))
+* PYPI Token ([e834b99](https://github.com/grumbach/self_encryption/commit/e834b998ef273db5d754e1521c0bb40f9a31a7c1))
+* PYPI Token / linux/mac/win ([a1f0959](https://github.com/grumbach/self_encryption/commit/a1f0959416383a719ad98a5e7e3e6786ce3a82a4))
+* PYPI Token / linux/mac/win ([d4bb999](https://github.com/grumbach/self_encryption/commit/d4bb999a47f807e3d8d8efca6add1d510bf356c7))
+* PYPI Token / linux/mac/win test 5 ([eba957e](https://github.com/grumbach/self_encryption/commit/eba957e0d5f92fe13675d01526fe05221b4a0b0e))
+* PYPI Token / linux/mac/win test 6 ([229658c](https://github.com/grumbach/self_encryption/commit/229658c924711269e41bd82c23a7eb4bd79bf18a))
+* PYPI Token / linux/mac/win test 7 ([32bcf4e](https://github.com/grumbach/self_encryption/commit/32bcf4e9683ec6499ea288511126ee454e527ffb))
+* PYPI Token / linux/mac/win test 8 ([ef2a18f](https://github.com/grumbach/self_encryption/commit/ef2a18fa0ffdd85356abd8603247922e86abcd18))
+* Python full bindings ([521854f](https://github.com/grumbach/self_encryption/commit/521854f4144908a2c443a0464ae3ffc4ed2c7c0f))
+* reduce MIN_CHUNK_SIZE and MIN_ENCRYPTABLE_BYTES down to 1/3 bytes. ([11f6a70](https://github.com/grumbach/self_encryption/commit/11f6a70e6c2a68085612b2c96d6aadca3c8c4f20))
+* reduce tokio dep requirements ([5f1ab1a](https://github.com/grumbach/self_encryption/commit/5f1ab1a3ccd6af6d190cdd3e1580ed0a874fe9a3))
+* reducing the max chunk size from 1MB to 500kB ([7577322](https://github.com/grumbach/self_encryption/commit/7577322d9288ce516a9e56dec3aa0977be45e1ac))
+* stream encryptor write encrypted chunks to disk ([5f3f906](https://github.com/grumbach/self_encryption/commit/5f3f906804cd2e6871f0f2e982977244afa5e3ec))
+* stream self encryptor ([abdc7c1](https://github.com/grumbach/self_encryption/commit/abdc7c11a404b65109009759ed13f30443f37737))
+* test full python bindings ([753c0f0](https://github.com/grumbach/self_encryption/commit/753c0f01e6411a88bc1de2e9b1bea3c0d74ba09e))
+* test pythno bindings ([ce5c188](https://github.com/grumbach/self_encryption/commit/ce5c188175f79d54fd7fb499ceb5bd8276439ab1))
+* test python bindings ([7ef8f31](https://github.com/grumbach/self_encryption/commit/7ef8f316d86bb15f4d39cd5d4e17b1ae82d8fc8c))
+* test python bindings ([47ca12f](https://github.com/grumbach/self_encryption/commit/47ca12f054d1eb1d36d267738b1a38676a9f8324))
+* **errors:** add specific for too few bytes ([4b572e9](https://github.com/grumbach/self_encryption/commit/4b572e9857529d76707d6e304d62d9a048850d42))
+
+
+### Bug Fixes
+
+* prevent panics in decrypt_full_set and decrypt_range ([58107d8](https://github.com/grumbach/self_encryption/commit/58107d8f332e03d2f371c33b3bcc5069e79a9f63))
+* remove unwanted file ([b92bace](https://github.com/grumbach/self_encryption/commit/b92bace5c3642f66df916c6ccb89dbb970bdfb66))
+* **decrypt:** prevent extra clones while decrypting chunks ([9f77326](https://github.com/grumbach/self_encryption/commit/9f77326bdf477d467ae992478bdc4a795286ef97))
+* **encryption:** fix CBC padding issues in chunk decryption ([84613e8](https://github.com/grumbach/self_encryption/commit/84613e8a84d9a317578e5e02c98f34de1a1c5c37))
+* correct max chunk size to 500kiB ([15f41a0](https://github.com/grumbach/self_encryption/commit/15f41a06c1845c9a5afc29d04c3b153b6dfdc889))
+* ensure decrypter targeting file shall not be pre-existing ([dbeacce](https://github.com/grumbach/self_encryption/commit/dbeaccedf9a1be4d6f0ebfb4229eb810c48a6b07))
+* minor clippy fix ([479adba](https://github.com/grumbach/self_encryption/commit/479adbaf350d6a473c0c2558c54fe4afdf4d2989))
+* **range:** allow to pass ranges with length overflowing data length ([919ed53](https://github.com/grumbach/self_encryption/commit/919ed53a4146da30b58ad9483cd98df85d3a4343))
+* **seek:** avoid range out of bounds panic ([fcd56b9](https://github.com/grumbach/self_encryption/commit/fcd56b9e33df2efa1632ef74030301b1a30bdc2f))
+
+
+* remove usage of Box<PathBuf> ([2a88d98](https://github.com/grumbach/self_encryption/commit/2a88d98acd51e0cebcc2c2d09287041354a0cf68))
+* rename secretkey to datamap ([75f4131](https://github.com/grumbach/self_encryption/commit/75f41311c2b3c562826f3646792774d4fbc9a728))
+
 ### [0.29.2](https://github.com/maidsafe/self_encryption/compare/v0.29.1...v0.29.2) (2024-04-22)
 
 ### [0.29.1](https://github.com/maidsafe/self_encryption/compare/v0.29.0...v0.29.1) (2024-01-24)
