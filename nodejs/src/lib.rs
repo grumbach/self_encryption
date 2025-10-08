@@ -8,12 +8,12 @@
 //! Storage of the encrypted chunks or DataMap is outside the scope of this library
 //! and must be implemented by the user.
 
+use napi::bindgen_prelude::*;
 use napi::JsBuffer;
 use napi::JsObject;
 use napi::NapiRaw;
 use napi::Result;
 use napi::Status;
-use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use self_encryption::bytes::Bytes;
 use self_encryption::xor_name::XOR_NAME_LEN;
@@ -57,7 +57,7 @@ fn try_from_big_int<T: TryFrom<u64>>(value: BigInt, arg: &str) -> Result<T> {
 /// The minimum size (before compression) of an individual chunk of a file, defined as 1B.
 #[napi]
 pub const MIN_CHUNK_SIZE: usize = self_encryption::MIN_CHUNK_SIZE;
-/// The maximum size (before compression) of an individual chunk of a file, defaulting as 1MiB.
+/// The maximum size (before compression) of an individual chunk of a file, defaulting as 4MiB.
 #[napi]
 pub const MAX_CHUNK_SIZE: usize = self_encryption::MAX_CHUNK_SIZE;
 /// Controls the compression-speed vs compression-density tradeoffs. The higher the quality, the slower the compression. Range is 0 to 11.
@@ -90,12 +90,12 @@ impl XorName {
     /// Get the underlying bytes of the XorName.
     #[napi]
     pub fn as_bytes(&self) -> Uint8Array {
-        Uint8Array::from(self.0.0.to_vec())
+        Uint8Array::from(self.0 .0.to_vec())
     }
 
     #[napi]
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0.0)
+        hex::encode(self.0 .0)
     }
 
     #[napi]

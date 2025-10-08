@@ -9,8 +9,8 @@
 //! Streaming decryption functionality for memory-efficient processing of large encrypted files.
 
 use crate::{
-    decrypt::decrypt_chunk, get_root_data_map_parallel, utils::extract_hashes,
-    ChunkInfo, DataMap, Result,
+    decrypt::decrypt_chunk, get_root_data_map_parallel, utils::extract_hashes, ChunkInfo, DataMap,
+    Result,
 };
 use bytes::Bytes;
 use std::ops::Range;
@@ -239,15 +239,15 @@ where
 
     /// Calculate chunk index from position based on actual chunk sizes in chunk_infos.
     /// This avoids issues when the input datamap was generated using different MAX_CHUNK_SIZE schemes.
-    /// 
+    ///
     /// # Arguments
     /// * `position` - Byte position within the file
-    /// 
+    ///
     /// # Returns
     /// * `usize` - The chunk index that contains the given position
     fn get_chunk_index_from_infos(&self, position: usize) -> usize {
         let mut accumulated_size = 0;
-        
+
         for chunk_info in &self.chunk_infos {
             // Check if position falls within this chunk
             if position >= accumulated_size && position < accumulated_size + chunk_info.src_size {
@@ -255,7 +255,7 @@ where
             }
             accumulated_size += chunk_info.src_size;
         }
-        
+
         // If position is beyond all chunks, return the last chunk index
         // This handles the case where position == file_size
         if let Some(last_chunk) = self.chunk_infos.last() {
@@ -960,33 +960,40 @@ mod tests {
         // This test reproduces the exact scenario reported:
         // file_size: 16405289714, start_position: 4194304u64
         // We expect start_chunk_pos <= start_position, and if smaller,
-        // the difference should be less than 1MB (1024*1024)
-        
+        // the difference should be less than MAX_CHUNK_SIZE
+
         let file_size = 16404310194u64 as usize; // ~15.27 GB
-        let start_position = 4194304u64 as usize; // 1MB before end
+        let start_position = 4194304u64 as usize; // 4MB before end
 
         // Simulate different MAX_CHUNK_SIZE cheme
         let max_chunk_size = crate::MAX_CHUNK_SIZE * 2;
-        
-        println!("Testing with file_size: {}, start_position: {}", file_size, start_position);
-        
+
+        println!(
+            "Testing with file_size: {}, start_position: {}",
+            file_size, start_position
+        );
+
         // First, create the mock data map to use with get_chunk_index_from_infos
         // We need this to avoid dependency on MAX_CHUNK_SIZE utility functions
-        
+
         // Create a mock data map that simulates how chunks would be distributed
         // for a file of this size. We need to generate chunk infos with realistic
         // src_size values that match how the encryption algorithm would chunk the data.
-        
+
         let num_chunks = crate::utils::get_num_chunks_with_variable_max(file_size, max_chunk_size);
         println!("Total number of chunks: {}", num_chunks);
-        
+
         let mut chunk_infos = Vec::new();
         let mut accumulated_size = 0;
-        
+
         // Generate chunk infos with sizes that match the actual chunking algorithm
         for chunk_index in 0..num_chunks {
-            let chunk_size = crate::utils::get_chunk_size_with_variable_max(file_size, chunk_index, max_chunk_size);
-            
+            let chunk_size = crate::utils::get_chunk_size_with_variable_max(
+                file_size,
+                chunk_index,
+                max_chunk_size,
+            );
+
             // Create a ChunkInfo with dummy hashes (as the test notes, only src_size and index matter)
             let chunk_info = ChunkInfo {
                 index: chunk_index,
@@ -994,22 +1001,24 @@ mod tests {
                 src_hash: XorName::from_content(&[(chunk_index + 1) as u8]), // Dummy hash
                 src_size: chunk_size,
             };
-            
+
             chunk_infos.push(chunk_info);
             accumulated_size += chunk_size;
         }
-        
+
         // Verify the total size matches
-        assert_eq!(accumulated_size, file_size, "Mock data map total size should match file size");
-        
+        assert_eq!(
+            accumulated_size, file_size,
+            "Mock data map total size should match file size"
+        );
+
         // Create a mock DecryptionStream to test get_chunk_start_position
         let data_map = DataMap::new(chunk_infos);
-        
+
         // Create a dummy get_chunk_parallel function (won't be used in this test)
-        let get_chunk_parallel = |_hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
-            Ok(Vec::new())
-        };
-        
+        let get_chunk_parallel =
+            |_hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> { Ok(Vec::new()) };
+
         // Create a mock DecryptionStream
         let mock_stream = DecryptionStream {
             chunk_infos: data_map.infos(),
@@ -1022,30 +1031,34 @@ mod tests {
 
         // Use the new get_chunk_index_from_infos method instead of the utility function
         let start_chunk_index = mock_stream.get_chunk_index_from_infos(start_position);
-        println!("Calculated start_chunk_index using get_chunk_index_from_infos: {}", start_chunk_index);
-        
+        println!(
+            "Calculated start_chunk_index using get_chunk_index_from_infos: {}",
+            start_chunk_index
+        );
+
         // Test get_chunk_start_position
         let start_chunk_pos = mock_stream.get_chunk_start_position(start_chunk_index);
-        
+
         println!("start_chunk_pos: {}", start_chunk_pos);
         println!("start_position: {}", start_position);
-        
+
         // Verify our expectations
         if start_chunk_pos <= start_position {
             println!("✓ start_chunk_pos <= start_position (as expected)");
-            
+
             if start_chunk_pos < start_position {
                 let diff = start_position - start_chunk_pos;
                 println!("Difference: {}", diff);
-                
-                // The difference should be less than 1MB (1024*1024 = 1048576)
+
+                // The difference should be less than MAX_CHUNK_SIZE
                 assert!(
-                    diff < 1024 * 1024,
-                    "Difference {} should be less than 1MB (1048576), but got {}",
+                    diff <= crate::MAX_CHUNK_SIZE,
+                    "Difference {} should be less than {}, but got {}",
                     diff,
+                    crate::MAX_CHUNK_SIZE,
                     diff
                 );
-                println!("✓ Difference {} is less than 1MB", diff);
+                println!("✓ Difference {} is less than MAX_CHUNK_SIZE", diff);
             } else {
                 println!("start_chunk_pos exactly equals start_position");
             }
@@ -1057,27 +1070,28 @@ mod tests {
                 start_chunk_pos, start_position, would_underflow
             );
         }
-        
+
         // Additional verification: calculate what the internal_offset would be
         let internal_offset = start_position - start_chunk_pos;
         println!("Calculated internal_offset: {}", internal_offset);
-        
+
         // Verify this is reasonable (should be less than chunk size)
         // Get chunk size from the actual data map instead of utility function
-        let chunk_size = mock_stream.chunk_infos
+        let chunk_size = mock_stream
+            .chunk_infos
             .iter()
             .find(|info| info.index == start_chunk_index)
             .map(|info| info.src_size)
             .unwrap_or(0);
         println!("Chunk {} size: {}", start_chunk_index, chunk_size);
-        
+
         assert!(
             internal_offset < chunk_size,
             "internal_offset {} should be less than chunk size {}",
             internal_offset,
             chunk_size
         );
-        
+
         println!("✓ Test passed: No underflow condition detected");
         Ok(())
     }

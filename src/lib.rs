@@ -134,8 +134,8 @@ pub const MAX_CHUNK_SIZE: usize = match std::option_env!("MAX_CHUNK_SIZE") {
         Ok(v) => v,
         Err(_err) => panic!("`MAX_CHUNK_SIZE` failed to parse as usize"),
     },
-    // Default to 1MiB
-    None => 1024 * 1024,
+    // Default to 4MiB
+    None => 4 * 1024 * 1024,
 };
 
 /// The minimum size (before compression) of an individual chunk of a file, defined as 1B.

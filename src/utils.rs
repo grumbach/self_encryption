@@ -70,7 +70,7 @@ pub(crate) fn get_num_chunks_with_variable_max(file_size: usize, max_chunk_size:
     if file_size < (3 * max_chunk_size) {
         return 3;
     }
-    if file_size % max_chunk_size == 0 {
+    if file_size.is_multiple_of(max_chunk_size) {
         file_size / max_chunk_size
     } else {
         (file_size / max_chunk_size) + 1
