@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *When editing this file, please respect a line length of 100.*
 
+## [0.34.2] - 2025-10-08
+
+### Changed
+- Max chunk size is now set to 4MB by default. This is the default currently being used in
+  production and we are setting it here to avoid mistakes when building binaries that depend on self
+  encryption.
+
 ## [0.34.1] - 2025-09-09
 
 ### Fixed
