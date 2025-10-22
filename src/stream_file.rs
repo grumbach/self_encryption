@@ -16,7 +16,7 @@ use crate::{
 use bytes::Bytes;
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{BufReader, Read, Write},
     path::Path,
 };
 use xor_name::XorName;
@@ -25,12 +25,6 @@ use xor_name::XorName;
 ///
 /// Rather than reading the entire file into memory, this function streams through the file
 /// and encrypts it in chunks. This is more memory-efficient for large files.
-///
-/// The function reads the file twice:
-/// 1. First pass: collect all source hashes
-/// 2. Second pass: encrypt chunks (except first two) and store them
-/// 3. Process first two chunks with complete source hash information
-/// 4. Apply shrinking if needed
 ///
 /// This maintains correct self-encryption while being memory-efficient.
 ///
@@ -68,12 +62,45 @@ use xor_name::XorName;
 /// # Ok(())
 /// # }
 /// ```
-pub fn streaming_encrypt_from_file<F>(file_path: &Path, mut chunk_store: F) -> Result<DataMap>
+pub fn streaming_encrypt_from_file<F>(file_path: &Path, chunk_store: F) -> Result<DataMap>
 where
     F: FnMut(XorName, Bytes) -> Result<()>,
 {
-    use std::io::{BufReader, Read};
+    // Use the core function with the provided chunk store
+    let (_original_data_map, shrunk_map) = streaming_encrypt_core(file_path, chunk_store)?;
 
+    // Return the shrunk map - decrypt will handle getting back to the root map
+    Ok(shrunk_map)
+}
+
+/// Core streaming encryption logic with chunk storage
+///
+/// This helper function performs the core encryption logic of streaming file encryption.
+/// It stores chunks using the provided chunk_store function. This allows for efficient
+/// reuse of the encryption logic between different public functions.
+///
+/// The function reads the file twice:
+/// 1. First pass: collect all source hashes
+/// 2. Second pass: encrypt chunks (except first two) and store them
+/// 3. Process first two chunks with complete source hash information
+/// 4. Create initial data map and apply shrinking
+///
+/// This maintains correct self-encryption while being memory-efficient.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the file to process
+/// * `chunk_store` - Function to store encrypted chunks
+///
+/// # Returns
+///
+/// Returns a tuple containing:
+/// * `DataMap` - The original data map before shrinking
+/// * `DataMap` - The final data map after shrinking (if applied)
+fn streaming_encrypt_core<F>(file_path: &Path, mut chunk_store: F) -> Result<(DataMap, DataMap)>
+where
+    F: FnMut(XorName, Bytes) -> Result<()>,
+{
     let file = File::open(file_path)?;
     let file_size = file.metadata()?.len() as usize;
 
@@ -116,6 +143,7 @@ where
             let encrypted_content = crate::encrypt::encrypt_chunk(chunk_bytes, pki)?;
             let dst_hash = XorName::from_content(&encrypted_content);
 
+            // Store chunk using the provided store function
             chunk_store(dst_hash, encrypted_content)?;
 
             chunk_infos.push(ChunkInfo {
@@ -133,6 +161,7 @@ where
         let encrypted_content = crate::encrypt::encrypt_chunk(chunk_data, pki)?;
         let dst_hash = XorName::from_content(&encrypted_content);
 
+        // Store chunk using the provided store function
         chunk_store(dst_hash, encrypted_content)?;
 
         chunk_infos.insert(
@@ -147,14 +176,57 @@ where
     }
 
     // Create initial data map and shrink it
-    let data_map = DataMap::new(chunk_infos);
-    let (shrunk_map, _) = shrink_data_map(data_map, |hash, content| {
+    let original_data_map = DataMap::new(chunk_infos);
+    let (shrunk_map, _) = shrink_data_map(original_data_map.clone(), |hash, content| {
+        // Store shrink chunks using the provided store function
         chunk_store(hash, content)?;
         Ok(())
     })?;
 
-    // Return the shrunk map - decrypt will handle getting back to the root map
-    Ok(shrunk_map)
+    // Return both the original and shrunk maps
+    Ok((original_data_map, shrunk_map))
+}
+
+/// Generate data maps from file without storing chunks
+///
+/// This helper function performs the core encryption logic of streaming file encryption
+/// but returns both the original and shrunk data maps without actually storing any chunks.
+/// This is useful for scenarios where you need the data maps for analysis or when you
+/// want to handle chunk storage separately.
+///
+/// This maintains correct self-encryption while being memory-efficient by using a
+/// placeholder chunk store function that doesn't actually store anything.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the file to process
+///
+/// # Returns
+///
+/// Returns a tuple containing:
+/// * `DataMap` - The original data map before shrinking
+/// * `DataMap` - The final data map after shrinking (if applied)
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use self_encryption::{streaming_encrypt_datamaps_from_file, Result};
+///
+/// # fn main() -> Result<()> {
+/// let (original_map, shrunk_map) = streaming_encrypt_datamaps_from_file("large_file.bin".as_ref())?;
+/// println!("Original map has {} chunks", original_map.len());
+/// println!("Shrunk map has {} chunks", shrunk_map.len());
+/// # Ok(())
+/// # }
+/// ```
+pub fn streaming_encrypt_datamaps_from_file(file_path: &Path) -> Result<(DataMap, DataMap)> {
+    // Use a placeholder function that doesn't actually store chunks - this improves memory efficiency
+    let placeholder_store = |_hash: XorName, _content: Bytes| -> Result<()> {
+        // Do nothing - we only want the data maps, not to store chunks
+        Ok(())
+    };
+
+    streaming_encrypt_core(file_path, placeholder_store)
 }
 
 /// Decrypts data from storage using streaming approach, processing chunks in batches
@@ -463,6 +535,165 @@ mod tests {
         assert_eq!(decrypted1, original_data);
         assert_eq!(decrypted2, original_data);
         assert_eq!(decrypted1, decrypted2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_encrypt_datamaps_from_file_basic() -> Result<()> {
+        use std::io::Write;
+
+        // Create a temporary file with test data
+        let test_data = random_bytes(50_000); // 50KB
+        let mut temp_file = NamedTempFile::new()?;
+        temp_file.write_all(&test_data)?;
+
+        // Generate data maps without storing chunks
+        let (original_map, shrunk_map) = streaming_encrypt_datamaps_from_file(temp_file.path())?;
+
+        // Verify both maps are valid
+        assert!(original_map.len() >= 3);
+        assert!(shrunk_map.len() <= 3);
+
+        // Verify the original map has the expected structure
+        for (i, info) in original_map.infos().iter().enumerate() {
+            assert_eq!(info.index, i);
+            assert!(info.src_size > 0);
+        }
+
+        // Verify the shrunk map has the expected structure
+        for (i, info) in shrunk_map.infos().iter().enumerate() {
+            assert_eq!(info.index, i);
+            assert!(info.src_size > 0);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_encrypt_datamaps_consistency() -> Result<()> {
+        use std::io::Write;
+
+        // Test that the helper function produces consistent results with the full function
+        let file_size = 200_000;
+        let original_data = random_bytes(file_size);
+
+        // Write data to temporary file
+        let mut temp_file = NamedTempFile::new()?;
+        temp_file.write_all(&original_data)?;
+
+        // Get data maps using the helper function
+        let (_original_map_helper, shrunk_map_helper) =
+            streaming_encrypt_datamaps_from_file(temp_file.path())?;
+
+        // Get data map using the full streaming function
+        let streaming_storage = Arc::new(Mutex::new(HashMap::new()));
+        let streaming_storage_clone = streaming_storage.clone();
+
+        let streaming_store = move |hash: XorName, content: Bytes| -> Result<()> {
+            let _ = streaming_storage_clone
+                .lock()
+                .unwrap()
+                .insert(hash, content.to_vec());
+            Ok(())
+        };
+
+        let shrunk_map_full = streaming_encrypt_from_file(temp_file.path(), streaming_store)?;
+
+        // The shrunk maps should be identical
+        assert_eq!(shrunk_map_helper.len(), shrunk_map_full.len());
+        assert_eq!(shrunk_map_helper.is_child(), shrunk_map_full.is_child());
+        assert_eq!(shrunk_map_helper.child(), shrunk_map_full.child());
+
+        // Compare chunk info
+        for (helper_info, full_info) in shrunk_map_helper
+            .infos()
+            .iter()
+            .zip(shrunk_map_full.infos().iter())
+        {
+            assert_eq!(helper_info.index, full_info.index);
+            assert_eq!(helper_info.dst_hash, full_info.dst_hash);
+            assert_eq!(helper_info.src_hash, full_info.src_hash);
+            assert_eq!(helper_info.src_size, full_info.src_size);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_encrypt_datamaps_large_file() -> Result<()> {
+        use std::io::Write;
+
+        // Test with a larger file that will require shrinking
+        let file_size = 16 * 1024 * 1024; // 16MB
+        let test_data = random_bytes(file_size);
+        let mut temp_file = NamedTempFile::new()?;
+        temp_file.write_all(&test_data)?;
+
+        // Generate data maps
+        let (original_map, shrunk_map) = streaming_encrypt_datamaps_from_file(temp_file.path())?;
+
+        // For a 16MB file, we should have many chunks in the original map
+        assert!(original_map.len() > 3);
+
+        // Verify the original file size is preserved
+        assert_eq!(original_map.original_file_size(), file_size);
+
+        // But the shrunk map should have 3 or fewer chunks
+        assert!(shrunk_map.len() <= 3);
+
+        // The shrunk map should be a child map (since it was shrunk)
+        assert!(shrunk_map.is_child());
+
+        // Verify the shrunk map referring to a smaller size
+        assert!(shrunk_map.original_file_size() < file_size);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_encrypt_datamaps_memory_efficiency() -> Result<()> {
+        use std::io::Write;
+
+        // Test that the function doesn't store chunks in memory
+        let file_size = 1024 * 1024; // 1MB
+        let test_data = random_bytes(file_size);
+        let mut temp_file = NamedTempFile::new()?;
+        temp_file.write_all(&test_data)?;
+
+        // This should work without storing any chunks
+        let (original_map, shrunk_map) = streaming_encrypt_datamaps_from_file(temp_file.path())?;
+
+        // Verify we got valid maps
+        assert!(original_map.len() >= 3);
+        assert!(shrunk_map.len() <= original_map.len());
+
+        // The function should complete successfully without running out of memory
+        // (This is more of a regression test - if chunk storage was accidentally enabled,
+        // this would consume more memory than expected)
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_encrypt_datamaps_error_cases() -> Result<()> {
+        use std::io::Write;
+
+        // Test with file too small for self-encryption
+        let small_data = random_bytes(2); // Much smaller than MIN_ENCRYPTABLE_BYTES
+        let mut small_temp_file = NamedTempFile::new()?;
+        small_temp_file.write_all(&small_data)?;
+
+        let result = streaming_encrypt_datamaps_from_file(small_temp_file.path());
+        assert!(result.is_err());
+        if let Err(Error::Generic(msg)) = result {
+            assert!(msg.contains("Too small for self-encryption"));
+        }
+
+        // Test with non-existent file
+        let non_existent_path = std::path::Path::new("/non/existent/file.bin");
+        let result = streaming_encrypt_datamaps_from_file(non_existent_path);
+        assert!(result.is_err());
 
         Ok(())
     }
