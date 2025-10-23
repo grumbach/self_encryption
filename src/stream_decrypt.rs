@@ -10,15 +10,11 @@
 
 use crate::{
     decrypt::decrypt_chunk, get_root_data_map_parallel, utils::extract_hashes, ChunkInfo, DataMap,
-    Result,
+    Result, STREAM_DECRYPT_BATCH_SIZE,
 };
 use bytes::Bytes;
 use std::ops::Range;
 use xor_name::XorName;
-
-/// Batch size for streaming decrypt chunk fetching
-/// With each batch, we fetch 10 chunks in parallel and decrypt them
-const STREAM_DECRYPT_BATCH_SIZE: usize = 10;
 
 /// Iterator that yields decrypted chunks as `Bytes` in streaming fashion.
 ///
@@ -75,7 +71,7 @@ where
         }
 
         let batch_end =
-            (self.current_batch_start + STREAM_DECRYPT_BATCH_SIZE).min(self.chunk_infos.len());
+            (self.current_batch_start + *STREAM_DECRYPT_BATCH_SIZE).min(self.chunk_infos.len());
         let batch_infos = &self.chunk_infos[self.current_batch_start..batch_end];
 
         // Extract chunk hashes for this batch

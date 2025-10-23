@@ -11,7 +11,7 @@
 use crate::{
     decrypt_chunk, get_num_chunks, get_start_end_positions, shrink_data_map,
     utils::get_pad_key_and_iv, ChunkInfo, DataMap, EncryptedChunk, Error, Result, MAX_CHUNK_SIZE,
-    MIN_ENCRYPTABLE_BYTES,
+    MIN_ENCRYPTABLE_BYTES, STREAM_DECRYPT_BATCH_SIZE,
 };
 use bytes::Bytes;
 use std::{
@@ -267,12 +267,8 @@ where
     chunk_infos.sort_by_key(|info| info.index);
     let src_hashes = crate::extract_hashes(&root_map);
 
-    // Process chunks in batches to minimize memory usage
-    // Use a reasonable batch size - could be made configurable
-    const BATCH_SIZE: usize = 10;
-
-    for batch_start in (0..chunk_infos.len()).step_by(BATCH_SIZE) {
-        let batch_end = (batch_start + BATCH_SIZE).min(chunk_infos.len());
+    for batch_start in (0..chunk_infos.len()).step_by(*STREAM_DECRYPT_BATCH_SIZE) {
+        let batch_end = (batch_start + *STREAM_DECRYPT_BATCH_SIZE).min(chunk_infos.len());
         let batch_infos = &chunk_infos[batch_start..batch_end];
 
         // Extract chunk hashes for this batch

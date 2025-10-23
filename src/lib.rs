@@ -112,18 +112,32 @@ pub use self::{
     error::{Error, Result},
     stream_decrypt::{streaming_decrypt, DecryptionStream},
     stream_encrypt::{stream_encrypt, ChunkStream, EncryptionStream},
-    stream_file::{streaming_decrypt_from_storage, streaming_encrypt_from_file, streaming_encrypt_datamaps_from_file},
+    stream_file::{
+        streaming_decrypt_from_storage, streaming_encrypt_datamaps_from_file,
+        streaming_encrypt_from_file,
+    },
 };
 use bytes::Bytes;
 use std::{
     fs::File,
     io::{Read, Write},
     path::Path,
+    sync::LazyLock,
 };
 
 // export these because they are used in our public API.
 pub use bytes;
 pub use xor_name;
+
+/// Batch size for streaming decrypt chunk fetching.
+///
+/// Can be overridden by the `STREAM_DECRYPT_BATCH_SIZE` environment variable.
+pub static STREAM_DECRYPT_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("STREAM_DECRYPT_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10)
+});
 
 /// The minimum size (before compression) of data to be self-encrypted, defined as 3B.
 pub const MIN_ENCRYPTABLE_BYTES: usize = 3 * MIN_CHUNK_SIZE;
