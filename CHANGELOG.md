@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *When editing this file, please respect a line length of 100.*
 
+## [0.34.3] - 2025-11-27
+
+### Changed
+- Avoid holding individual file handler for each chunk. This resolved an issue we found with long
+  downloads when multiple `ant` instances were running at the same time.
+
 ## [0.34.2] - 2025-10-08
 
 ### Changed
