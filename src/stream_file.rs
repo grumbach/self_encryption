@@ -267,6 +267,8 @@ where
     chunk_infos.sort_by_key(|info| info.index);
     let src_hashes = crate::extract_hashes(&root_map);
 
+    let mut has_initialized_file = false;
+
     for batch_start in (0..chunk_infos.len()).step_by(*STREAM_DECRYPT_BATCH_SIZE) {
         let batch_end = (batch_start + *STREAM_DECRYPT_BATCH_SIZE).min(chunk_infos.len());
         let batch_infos = &chunk_infos[batch_start..batch_end];
@@ -288,41 +290,28 @@ where
             .collect::<Vec<_>>();
 
         // Process and write this batch immediately to disk
-        for (i, (info, chunk)) in batch_infos.iter().zip(batch_chunks.iter()).enumerate() {
+        let mut batch_file = if !has_initialized_file {
+            has_initialized_file = true;
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(output_filepath)?
+        } else {
+            OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(output_filepath)?
+        };
+
+        for (info, chunk) in batch_infos.iter().zip(batch_chunks.iter()) {
             let decrypted_chunk = decrypt_chunk(info.index, &chunk.content, &src_hashes)?;
 
-            // For the first chunk in the entire process, create/overwrite the file
-            // For subsequent chunks, append to the file
-            if batch_start == 0 && i == 0 {
-                // First chunk: create/overwrite the file
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true) // Ensure we start with a clean file
-                    .open(output_filepath)?;
-                file.write_all(&decrypted_chunk)?;
-                file.sync_all()?;
-            } else {
-                // Subsequent chunks: append to the file
-                append_to_file(output_filepath, &decrypted_chunk)?;
-            }
+            batch_file.write_all(&decrypted_chunk)?;
         }
+
+        batch_file.sync_all()?;
     }
-
-    Ok(())
-}
-
-/// Appends content to an existing file.
-/// This function is memory-efficient as it doesn't keep the file handle open.
-/// Note: This should only be used for chunks after the first one, as it appends to existing content.
-fn append_to_file(file_path: &Path, content: &Bytes) -> std::io::Result<()> {
-    let mut file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(file_path)?;
-
-    file.write_all(content)?;
-    file.sync_all()?; // Ensure data is written to disk
 
     Ok(())
 }
