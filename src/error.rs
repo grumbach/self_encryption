@@ -22,15 +22,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("An error during compression or decompression.")]
     Compression,
-    #[error("An error during initializing CBC-AES cipher instance.")]
+    #[error("An error during initializing cipher instance.")]
     Cipher(String),
     #[error("An error within the symmetric encryption process.")]
     Encryption,
-    #[error("An error within the symmetric decryption process({})", _0)]
+    #[error("An error within the symmetric decryption process({_0})")]
     Decryption(String),
     #[error("A generic I/O error")]
     Io(#[from] IoError),
-    #[error("Generic error({})", _0)]
+    #[error("Generic error({_0})")]
     Generic(String),
     #[error("Serialisation error")]
     Bincode(#[from] Box<ErrorKind>),
@@ -42,7 +42,7 @@ pub enum Error {
     Rng(#[from] rand::Error),
     #[error("Unable to obtain lock")]
     Poison,
-    #[error("Python error: {}", _0)]
+    #[error("Python error: {_0}")]
     Python(String),
 }
 

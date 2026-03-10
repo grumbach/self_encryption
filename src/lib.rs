@@ -10,7 +10,7 @@
 //!
 //! This library provides convergent encryption on file-based data and produces a `DataMap` type and
 //! several chunks of encrypted data. Each chunk is up to 1MB in size and has an index and a name. This name is the
-//! SHA3-256 hash of the content, which allows the chunks to be self-validating.  If size and hash
+//! BLAKE3 hash of the content, which allows the chunks to be self-validating.  If size and hash
 //! checks are utilised, a high degree of certainty in the validity of the data can be expected.
 //!
 //! [Project GitHub page](https://github.com/maidsafe/self_encryption).
@@ -88,12 +88,14 @@
 // https://github.com/rust-lang-nursery/rust-clippy/issues/2267
 #![allow(clippy::cast_lossless, clippy::decimal_literal_representation)]
 
-mod aes;
 mod chunk;
+mod cipher;
 mod data_map;
 mod decrypt;
 mod encrypt;
 mod error;
+/// BLAKE3 content hashing (replaces SHA3-256)
+pub mod hash;
 #[cfg(feature = "python")]
 mod python;
 mod stream_decrypt;
@@ -119,6 +121,7 @@ pub use self::{
 };
 use bytes::Bytes;
 use std::{
+    collections::HashMap,
     fs::File,
     io::{Read, Write},
     path::Path,
@@ -173,7 +176,7 @@ pub fn encrypt_from_file(file_path: &Path, output_dir: &Path) -> Result<(DataMap
 
     // Store all chunks to disk
     for chunk in encrypted_chunks {
-        let chunk_name = XorName::from_content(&chunk.content);
+        let chunk_name = hash::content_hash(&chunk.content);
         chunk_names.push(chunk_name);
 
         let file_path = output_dir.join(hex::encode(chunk_name));
@@ -210,7 +213,7 @@ pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
     for chunk_index in 0..num_chunks {
         let (start, end) = get_start_end_positions(file_size, chunk_index);
         let chunk_data = bytes.slice(start..end);
-        let src_hash = XorName::from_content(&chunk_data);
+        let src_hash = hash::content_hash(&chunk_data);
         src_hashes.push(src_hash);
 
         // Store first two chunks for later processing
@@ -220,9 +223,9 @@ pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
         }
 
         // For chunks 2 onwards, we can encrypt immediately since we have the previous two hashes
-        let pki = get_pad_key_and_iv(chunk_index, &src_hashes);
+        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes)?;
         let encrypted_content = encrypt::encrypt_chunk(chunk_data, pki)?;
-        let dst_hash = XorName::from_content(&encrypted_content);
+        let dst_hash = hash::content_hash(&encrypted_content);
 
         encrypted_chunks.push(EncryptedChunk {
             content: encrypted_content,
@@ -238,9 +241,9 @@ pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
 
     // Now process the first two chunks using the complete set of source hashes
     for (chunk_index, chunk_data, src_hash, src_size) in first_chunks {
-        let pki = get_pad_key_and_iv(chunk_index, &src_hashes);
+        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes)?;
         let encrypted_content = encrypt::encrypt_chunk(chunk_data, pki)?;
-        let dst_hash = XorName::from_content(&encrypted_content);
+        let dst_hash = hash::content_hash(&encrypted_content);
 
         encrypted_chunks.insert(
             chunk_index,
@@ -288,9 +291,9 @@ pub(crate) fn decrypt_full_set(data_map: &DataMap, chunks: &[EncryptedChunk]) ->
     let src_hashes = extract_hashes(data_map);
 
     // Create a mapping of chunk hashes to chunks for efficient lookup
-    let chunk_map: std::collections::HashMap<XorName, &EncryptedChunk> = chunks
+    let chunk_map: HashMap<XorName, &EncryptedChunk> = chunks
         .iter()
-        .map(|chunk| (XorName::from_content(&chunk.content), chunk))
+        .map(|chunk| (hash::content_hash(&chunk.content), chunk))
         .collect();
 
     // Get chunks in the order specified by the data map
@@ -328,9 +331,9 @@ pub(crate) fn decrypt_range(
     let src_hashes = extract_hashes(data_map);
 
     // Create a mapping of chunk hashes to chunks for efficient lookup
-    let chunk_map: std::collections::HashMap<XorName, &EncryptedChunk> = chunks
+    let chunk_map: HashMap<XorName, &EncryptedChunk> = chunks
         .iter()
-        .map(|chunk| (XorName::from_content(&chunk.content), chunk))
+        .map(|chunk| (hash::content_hash(&chunk.content), chunk))
         .collect();
 
     // Get chunk size info
@@ -394,20 +397,21 @@ where
 
     while data_map.len() > 3 {
         let child_level = data_map.child().unwrap_or(0);
-        let bytes = test_helpers::serialise(&data_map)
+        let bytes = data_map
+            .to_bytes()
             .map(Bytes::from)
-            .map_err(|_| Error::Generic("Failed to serialize data map".to_string()))?;
+            .map_err(|e| Error::Generic(format!("Failed to serialize data map: {e}")))?;
 
         let (mut new_data_map, encrypted_chunks) = encrypt(bytes)?;
 
         // Store and collect chunks
         for chunk in &encrypted_chunks {
-            store_chunk(XorName::from_content(&chunk.content), chunk.content.clone())?;
+            store_chunk(hash::content_hash(&chunk.content), chunk.content.clone())?;
         }
         all_chunks.extend(encrypted_chunks);
 
         // Update data map for next iteration
-        new_data_map = DataMap::with_child(new_data_map.infos(), child_level + 1);
+        new_data_map = DataMap::with_child(new_data_map.infos().to_vec(), child_level + 1);
         data_map = new_data_map;
     }
     Ok((data_map, all_chunks))
@@ -420,16 +424,23 @@ where
     F: FnMut(XorName) -> Result<Bytes>,
 {
     // Create a cache of found chunks at the top level
-    let mut chunk_cache = std::collections::HashMap::new();
+    let mut chunk_cache = HashMap::new();
 
     fn inner_get_root_map<F>(
         data_map: DataMap,
         get_chunk: &mut F,
-        chunk_cache: &mut std::collections::HashMap<XorName, Bytes>,
+        chunk_cache: &mut HashMap<XorName, Bytes>,
+        depth: usize,
     ) -> Result<DataMap>
     where
         F: FnMut(XorName) -> Result<Bytes>,
     {
+        if depth > 100 {
+            return Err(Error::Generic(
+                "Maximum data map recursion depth exceeded".to_string(),
+            ));
+        }
+
         // If this is the root data map (no child level), return it
         if !data_map.is_child() {
             return Ok(data_map);
@@ -455,15 +466,15 @@ where
         let decrypted_bytes = decrypt_full_set(&data_map, &encrypted_chunks)?;
 
         // Deserialize into a DataMap
-        let parent_data_map = test_helpers::deserialise(&decrypted_bytes)
-            .map_err(|_| Error::Generic("Failed to deserialize data map".to_string()))?;
+        let parent_data_map = DataMap::from_bytes(&decrypted_bytes)
+            .map_err(|e| Error::Generic(format!("Failed to deserialize data map: {e}")))?;
 
         // Recursively get the root data map
-        inner_get_root_map(parent_data_map, get_chunk, chunk_cache)
+        inner_get_root_map(parent_data_map, get_chunk, chunk_cache, depth + 1)
     }
 
     // Start the recursive process with our cache
-    inner_get_root_map(data_map, get_chunk, &mut chunk_cache)
+    inner_get_root_map(data_map, get_chunk, &mut chunk_cache, 0)
 }
 
 /// Decrypts data using chunks retrieved from any storage backend via the provided retrieval function.
@@ -501,9 +512,9 @@ where
 /// Decrypts data using chunks retrieved from any storage backend via the provided retrieval function.
 pub fn decrypt(data_map: &DataMap, chunks: &[EncryptedChunk]) -> Result<Bytes> {
     // Create a mapping of chunk hashes to chunks for efficient lookup
-    let chunk_map: std::collections::HashMap<XorName, &EncryptedChunk> = chunks
+    let chunk_map: HashMap<XorName, &EncryptedChunk> = chunks
         .iter()
-        .map(|chunk| (XorName::from_content(&chunk.content), chunk))
+        .map(|chunk| (hash::content_hash(&chunk.content), chunk))
         .collect();
 
     // Helper function to find chunks using our hash map
@@ -558,16 +569,23 @@ where
     F: Fn(&[(usize, XorName)]) -> Result<Vec<(usize, Bytes)>>,
 {
     // Create a cache for chunks to avoid redundant retrievals
-    let mut chunk_cache = std::collections::HashMap::new();
+    let mut chunk_cache = HashMap::new();
 
     fn inner_get_root_map<F>(
         data_map: DataMap,
         get_chunk_parallel: &F,
-        chunk_cache: &mut std::collections::HashMap<XorName, Bytes>,
+        chunk_cache: &mut HashMap<XorName, Bytes>,
+        depth: usize,
     ) -> Result<DataMap>
     where
         F: Fn(&[(usize, XorName)]) -> Result<Vec<(usize, Bytes)>>,
     {
+        if depth > 100 {
+            return Err(Error::Generic(
+                "Maximum data map recursion depth exceeded".to_string(),
+            ));
+        }
+
         // If this is the root data map (no child level), return it
         if !data_map.is_child() {
             return Ok(data_map);
@@ -594,7 +612,8 @@ where
             .iter()
             .map(|info| {
                 let content = chunk_cache.get(&info.dst_hash).ok_or_else(|| {
-                    Error::Generic(format!("Chunk not found for hash: {:?}", info.dst_hash))
+                    let dst_hash = info.dst_hash;
+                    Error::Generic(format!("Chunk not found for hash: {dst_hash:?}"))
                 })?;
                 Ok(EncryptedChunk {
                     content: content.clone(),
@@ -604,15 +623,15 @@ where
 
         // Decrypt the chunks to get the parent data map bytes
         let decrypted_bytes = decrypt_full_set(&data_map, &encrypted_chunks)?;
-        let parent_data_map = test_helpers::deserialise(&decrypted_bytes)
-            .map_err(|_| Error::Generic("Failed to deserialize data map".to_string()))?;
+        let parent_data_map = DataMap::from_bytes(&decrypted_bytes)
+            .map_err(|e| Error::Generic(format!("Failed to deserialize data map: {e}")))?;
 
         // Recursively get the root data map
-        inner_get_root_map(parent_data_map, get_chunk_parallel, chunk_cache)
+        inner_get_root_map(parent_data_map, get_chunk_parallel, chunk_cache, depth + 1)
     }
 
     // Start the recursive process with our cache
-    inner_get_root_map(data_map, get_chunk_parallel, &mut chunk_cache)
+    inner_get_root_map(data_map, get_chunk_parallel, &mut chunk_cache, 0)
 }
 
 /// Serializes a data structure using bincode.
@@ -659,7 +678,7 @@ pub fn verify_chunk(name: XorName, bytes: &[u8]) -> Result<EncryptedChunk> {
     };
 
     // Calculate the hash of the encrypted content directly
-    let calculated_hash = XorName::from_content(chunk.content.as_ref());
+    let calculated_hash = hash::content_hash(chunk.content.as_ref());
 
     // Verify the hash matches
     if calculated_hash != name {
@@ -676,7 +695,6 @@ mod tests {
     use super::*;
     use crate::test_helpers::random_bytes;
     use std::{
-        collections::HashMap,
         io::Write,
         sync::{Arc, Mutex},
     };
@@ -696,8 +714,8 @@ mod tests {
         for i in 0..num_chunks {
             chunks.push(ChunkInfo {
                 index: i,
-                dst_hash: XorName::from_content(&[i as u8]),
-                src_hash: XorName::from_content(&[i as u8]),
+                dst_hash: hash::content_hash(&[i as u8]),
+                src_hash: hash::content_hash(&[i as u8]),
                 src_size: MIN_CHUNK_SIZE,
             });
         }
@@ -724,7 +742,7 @@ mod tests {
 
         // Store the chunks
         for chunk in &encrypted_chunks {
-            store(XorName::from_content(&chunk.content), chunk.content.clone())?;
+            store(hash::content_hash(&chunk.content), chunk.content.clone())?;
         }
         assert!(data_map.chunk_identifiers.len() <= 3);
 
@@ -765,7 +783,7 @@ mod tests {
 
         // Store all chunks
         for chunk in &all_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = hash::content_hash(&chunk.content);
             store(hash, chunk.content.clone())?;
         }
 

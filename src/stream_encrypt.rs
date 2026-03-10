@@ -11,7 +11,7 @@
 use crate::{
     encrypt::encrypt_chunk,
     shrink_data_map,
-    utils::{get_num_chunks, get_pad_key_and_iv, get_start_end_positions},
+    utils::{get_num_chunks, get_pad_key_and_nonce, get_start_end_positions},
     ChunkInfo, DataMap, EncryptedChunk, Error, Result,
 };
 use bytes::Bytes;
@@ -45,7 +45,7 @@ where
         match self.stream.next_internal() {
             Some(Ok(ChunkOrDataMap::Chunk(chunk))) => {
                 // Convert to (hash, content) tuple for direct usage
-                let hash = XorName::from_content(&chunk.content);
+                let hash = crate::hash::content_hash(&chunk.content);
                 let content = chunk.content;
                 Some(Ok((hash, content)))
             }
@@ -204,11 +204,21 @@ where
                 };
 
                 // Calculate source hash and store chunk info
-                let src_hash = XorName::from_content(&chunk_data);
-                self.src_hashes[chunk_index] = Some(src_hash);
-                self.chunk_infos[chunk_index] = Some(ChunkInfo {
+                let src_hash = crate::hash::content_hash(&chunk_data);
+                let entry = self.src_hashes.get_mut(chunk_index).ok_or_else(|| {
+                    Error::Generic(format!(
+                        "chunk index {chunk_index} out of bounds for src_hashes"
+                    ))
+                })?;
+                *entry = Some(src_hash);
+                let info_entry = self.chunk_infos.get_mut(chunk_index).ok_or_else(|| {
+                    Error::Generic(format!(
+                        "chunk index {chunk_index} out of bounds for chunk_infos"
+                    ))
+                })?;
+                *info_entry = Some(ChunkInfo {
                     index: chunk_index,
-                    dst_hash: XorName::from_content(&[]), // Will be filled when encrypted
+                    dst_hash: crate::hash::content_hash(&[]), // Will be filled when encrypted
                     src_hash,
                     src_size: chunk_data.len(),
                 });
@@ -216,7 +226,13 @@ where
                 // Handle encryption based on chunk index
                 if chunk_index < 2 {
                     // Defer first two chunks until we have all source hashes
-                    self.deferred_chunks[chunk_index] = Some(chunk_data);
+                    let deferred_entry =
+                        self.deferred_chunks.get_mut(chunk_index).ok_or_else(|| {
+                            Error::Generic(format!(
+                                "chunk index {chunk_index} out of bounds for deferred_chunks"
+                            ))
+                        })?;
+                    *deferred_entry = Some(chunk_data);
                 } else if self.can_encrypt_chunk(chunk_index) {
                     // Encrypt and yield chunk immediately (streaming behavior)
                     let encrypted_chunk = self.encrypt_chunk(chunk_index, chunk_data)?;
@@ -271,30 +287,42 @@ where
             self.src_hashes.iter().all(|h| h.is_some())
         } else {
             // Chunks 2+ need their own hash and the two dependencies
-            let (n1, n2) = crate::utils::get_n_1_n_2(chunk_index, self.total_chunks);
-            self.src_hashes[chunk_index].is_some()
-                && self.src_hashes[n1].is_some()
-                && self.src_hashes[n2].is_some()
+            let Ok((n1, n2)) = crate::utils::get_n_1_n_2(chunk_index, self.total_chunks) else {
+                return false;
+            };
+            self.src_hashes
+                .get(chunk_index)
+                .and_then(|h| h.as_ref())
+                .is_some()
+                && self.src_hashes.get(n1).and_then(|h| h.as_ref()).is_some()
+                && self.src_hashes.get(n2).and_then(|h| h.as_ref()).is_some()
         }
     }
 
     /// Encrypt a chunk and return the indexed encrypted chunk
     fn encrypt_chunk(&mut self, chunk_index: usize, chunk_data: Bytes) -> Result<EncryptedChunk> {
         // Get source hashes for encryption
-        let mut src_hashes = vec![XorName::from_content(&[]); self.total_chunks];
+        let mut src_hashes = vec![crate::hash::content_hash(&[]); self.total_chunks];
         for (i, hash_opt) in self.src_hashes.iter().enumerate() {
             if let Some(hash) = hash_opt {
-                src_hashes[i] = *hash;
+                let entry = src_hashes.get_mut(i).ok_or_else(|| {
+                    Error::Generic(format!("index {i} out of bounds for src_hashes"))
+                })?;
+                *entry = *hash;
             }
         }
 
         // Encrypt the chunk
-        let pki = get_pad_key_and_iv(chunk_index, &src_hashes);
+        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes)?;
         let encrypted_content = encrypt_chunk(chunk_data, pki)?;
-        let dst_hash = XorName::from_content(&encrypted_content);
+        let dst_hash = crate::hash::content_hash(&encrypted_content);
 
         // Update chunk info with destination hash
-        if let Some(chunk_info) = &mut self.chunk_infos[chunk_index] {
+        if let Some(chunk_info) = self
+            .chunk_infos
+            .get_mut(chunk_index)
+            .and_then(|c| c.as_mut())
+        {
             chunk_info.dst_hash = dst_hash;
         }
 
@@ -322,14 +350,22 @@ where
 
         // Process any deferred chunks that haven't been encrypted yet
         for chunk_index in 0..2.min(self.total_chunks) {
-            if let Some(chunk_data) = self.deferred_chunks[chunk_index].take() {
+            let chunk_data = self
+                .deferred_chunks
+                .get_mut(chunk_index)
+                .and_then(|entry| entry.take());
+            if let Some(chunk_data) = chunk_data {
                 // For deferred chunks, we need to encrypt them with full source hashes
-                let pki = get_pad_key_and_iv(chunk_index, &src_hashes);
+                let pki = get_pad_key_and_nonce(chunk_index, &src_hashes)?;
                 let encrypted_content = encrypt_chunk(chunk_data, pki)?;
-                let dst_hash = XorName::from_content(&encrypted_content);
+                let dst_hash = crate::hash::content_hash(&encrypted_content);
 
                 // Update chunk info
-                if let Some(chunk_info) = &mut self.chunk_infos[chunk_index] {
+                if let Some(chunk_info) = self
+                    .chunk_infos
+                    .get_mut(chunk_index)
+                    .and_then(|c| c.as_mut())
+                {
                     chunk_info.dst_hash = dst_hash;
                 }
 
@@ -369,17 +405,24 @@ where
         if !self.shrinking_chunks.is_empty()
             && self.shrinking_chunk_index < self.shrinking_chunks.len()
         {
-            let chunk = &self.shrinking_chunks[self.shrinking_chunk_index];
+            let chunk = self
+                .shrinking_chunks
+                .get(self.shrinking_chunk_index)
+                .ok_or_else(|| Error::Generic("Shrinking chunk index out of bounds".to_string()))?
+                .clone();
             self.shrinking_chunk_index += 1;
 
-            return Ok(Some(ChunkOrDataMap::Chunk(chunk.clone())));
+            return Ok(Some(ChunkOrDataMap::Chunk(chunk)));
         }
 
         // No more shrinking chunks, mark as complete and return DataMap
         self.is_complete = true;
-        Ok(Some(ChunkOrDataMap::DataMap(
-            self.final_datamap.as_ref().unwrap().clone(),
-        )))
+        match self.final_datamap.as_ref() {
+            Some(dm) => Ok(Some(ChunkOrDataMap::DataMap(dm.clone()))),
+            None => Err(Error::Generic(
+                "Final datamap missing after finalization".to_string(),
+            )),
+        }
     }
 }
 
@@ -389,65 +432,74 @@ where
 {
     /// Internal method to get the next item from the stream processing (used by ChunkStream)
     fn next_internal(&mut self) -> Option<Result<ChunkOrDataMap>> {
-        // Check if we have shrinking chunks to yield after processing is complete
-        if !self.shrinking_chunks.is_empty()
-            && self.shrinking_chunk_index < self.shrinking_chunks.len()
-        {
-            let chunk = &self.shrinking_chunks[self.shrinking_chunk_index];
-            self.shrinking_chunk_index += 1;
+        loop {
+            // Check if we have shrinking chunks to yield after processing is complete
+            if !self.shrinking_chunks.is_empty()
+                && self.shrinking_chunk_index < self.shrinking_chunks.len()
+            {
+                let chunk = match self.shrinking_chunks.get(self.shrinking_chunk_index) {
+                    Some(c) => c.clone(),
+                    None => {
+                        return Some(Err(Error::Generic(
+                            "Shrinking chunk index out of bounds".to_string(),
+                        )));
+                    }
+                };
+                self.shrinking_chunk_index += 1;
 
-            // If we've yielded all shrinking chunks, we can yield the final DataMap next
-            if self.shrinking_chunk_index >= self.shrinking_chunks.len() {
-                self.is_complete = true;
+                // If we've yielded all shrinking chunks, we can yield the final DataMap next
+                if self.shrinking_chunk_index >= self.shrinking_chunks.len() {
+                    self.is_complete = true;
+                }
+
+                return Some(Ok(ChunkOrDataMap::Chunk(chunk)));
             }
 
-            return Some(Ok(ChunkOrDataMap::Chunk(chunk.clone())));
-        }
+            if self.is_complete {
+                // Check if we have a final datamap to yield
+                if let Some(datamap) = &self.final_datamap {
+                    return Some(Ok(ChunkOrDataMap::DataMap(datamap.clone())));
+                }
 
-        if self.is_complete {
-            // Check if we have a final datamap to yield
-            if let Some(datamap) = &self.final_datamap {
-                return Some(Ok(ChunkOrDataMap::DataMap(datamap.clone())));
+                return None;
             }
 
-            return None;
-        }
+            // First, try to process any complete chunks from existing buffer
+            match self.try_process_chunks() {
+                Ok(Some(result)) => return Some(Ok(result)),
+                Ok(None) => {} // No chunks ready, need more data
+                Err(e) => return Some(Err(e)),
+            }
 
-        // First, try to process any complete chunks from existing buffer
-        match self.try_process_chunks() {
-            Ok(Some(result)) => return Some(Ok(result)),
-            Ok(None) => {} // No chunks ready, need more data
-            Err(e) => return Some(Err(e)),
-        }
+            // If no chunks are ready, try to get more data
+            if !self.input_complete {
+                match self.data_iter.next() {
+                    Some(data) => {
+                        self.buffer.extend_from_slice(&data);
 
-        // If no chunks are ready, try to get more data
-        if !self.input_complete {
-            match self.data_iter.next() {
-                Some(data) => {
-                    self.buffer.extend_from_slice(&data);
+                        // Try processing again with new data
+                        match self.try_process_chunks() {
+                            Ok(Some(result)) => return Some(Ok(result)),
+                            Ok(None) => continue, // Loop to try getting more data
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
+                    None => {
+                        // No more input data
+                        self.input_complete = true;
 
-                    // Try processing again with new data
-                    match self.try_process_chunks() {
-                        Ok(Some(result)) => Some(Ok(result)),
-                        Ok(None) => self.next_internal(), // Recurse to try getting more data
-                        Err(e) => Some(Err(e)),
+                        // Try final processing
+                        match self.try_process_chunks() {
+                            Ok(Some(result)) => return Some(Ok(result)),
+                            Ok(None) => return None, // All done
+                            Err(e) => return Some(Err(e)),
+                        }
                     }
                 }
-                None => {
-                    // No more input data
-                    self.input_complete = true;
-
-                    // Try final processing
-                    match self.try_process_chunks() {
-                        Ok(Some(result)) => Some(Ok(result)),
-                        Ok(None) => None, // All done
-                        Err(e) => Some(Err(e)),
-                    }
-                }
+            } else {
+                // Input is complete but no more results
+                return None;
             }
-        } else {
-            // Input is complete but no more results
-            None
         }
     }
 }
@@ -524,7 +576,7 @@ impl<I> EncryptionStream<I> {
     /// Returns the final DataMap after chunk iteration is complete, consuming the stream.
     ///
     /// This method should be called after the `chunks()` iterator has been
-    /// fully consumed. Panics if encryption is not yet complete.
+    /// fully consumed. Returns `None` if encryption is not yet complete.
     ///
     /// # Examples
     ///
@@ -550,9 +602,9 @@ impl<I> EncryptionStream<I> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_datamap(self) -> DataMap {
+    /// Returns the final DataMap, or `None` if encryption is not yet complete.
+    pub fn into_datamap(self) -> Option<DataMap> {
         self.final_datamap
-            .expect("Encryption not complete - ensure chunks() iterator was fully consumed")
     }
 }
 
@@ -806,7 +858,7 @@ mod tests {
         // Both should decrypt to same original data
         let mut standard_storage = HashMap::new();
         for chunk in standard_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = standard_storage.insert(hash, chunk.content.to_vec());
         }
 

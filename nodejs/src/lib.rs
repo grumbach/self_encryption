@@ -8,12 +8,12 @@
 //! Storage of the encrypted chunks or DataMap is outside the scope of this library
 //! and must be implemented by the user.
 
-use napi::bindgen_prelude::*;
 use napi::JsBuffer;
 use napi::JsObject;
 use napi::NapiRaw;
 use napi::Result;
 use napi::Status;
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use self_encryption::bytes::Bytes;
 use self_encryption::xor_name::XOR_NAME_LEN;
@@ -84,18 +84,18 @@ impl XorName {
     /// Create a new XorName from content bytes.
     #[napi(factory)]
     pub fn from_content(content: Uint8Array) -> Self {
-        Self(self_encryption::XorName::from_content(content.as_ref()))
+        Self(self_encryption::hash::content_hash(content.as_ref()))
     }
 
     /// Get the underlying bytes of the XorName.
     #[napi]
     pub fn as_bytes(&self) -> Uint8Array {
-        Uint8Array::from(self.0 .0.to_vec())
+        Uint8Array::from(self.0.0.to_vec())
     }
 
     #[napi]
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0 .0)
+        hex::encode(self.0.0)
     }
 
     #[napi]
@@ -192,7 +192,7 @@ impl DataMap {
     /// Returns the list of chunks pre and post encryption hashes if present.
     #[napi]
     pub fn infos(&self) -> Vec<ChunkInfo> {
-        self.0.infos().into_iter().map(ChunkInfo).collect()
+        self.0.infos().iter().cloned().map(ChunkInfo).collect()
     }
 
     /// Returns the child value if set
@@ -235,7 +235,7 @@ impl EncryptedChunk {
     #[napi]
     pub fn hash(&self) -> Uint8Array {
         Uint8Array::from(
-            self_encryption::XorName::from_content(&self.0.content)
+            self_encryption::hash::content_hash(&self.0.content)
                 .0
                 .to_vec(),
         )

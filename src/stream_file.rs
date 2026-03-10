@@ -10,8 +10,8 @@
 
 use crate::{
     decrypt_chunk, get_num_chunks, get_start_end_positions, shrink_data_map,
-    utils::get_pad_key_and_iv, ChunkInfo, DataMap, EncryptedChunk, Error, Result, MAX_CHUNK_SIZE,
-    MIN_ENCRYPTABLE_BYTES, STREAM_DECRYPT_BATCH_SIZE,
+    utils::get_pad_key_and_nonce, ChunkInfo, DataMap, EncryptedChunk, Error, Result,
+    MAX_CHUNK_SIZE, MIN_ENCRYPTABLE_BYTES, STREAM_DECRYPT_BATCH_SIZE,
 };
 use bytes::Bytes;
 use std::{
@@ -132,16 +132,16 @@ where
         reader.read_exact(&mut chunk_data)?;
 
         let chunk_bytes = Bytes::from(chunk_data);
-        let src_hash = XorName::from_content(&chunk_bytes);
+        let src_hash = crate::hash::content_hash(&chunk_bytes);
         src_hash_buffer.push(src_hash);
 
         if chunk_index < 2 {
             first_chunks.push((chunk_index, chunk_bytes, chunk_size));
         } else {
             // Process chunks after the first two immediately
-            let pki = get_pad_key_and_iv(chunk_index, &src_hash_buffer);
+            let pki = get_pad_key_and_nonce(chunk_index, &src_hash_buffer)?;
             let encrypted_content = crate::encrypt::encrypt_chunk(chunk_bytes, pki)?;
-            let dst_hash = XorName::from_content(&encrypted_content);
+            let dst_hash = crate::hash::content_hash(&encrypted_content);
 
             // Store chunk using the provided store function
             chunk_store(dst_hash, encrypted_content)?;
@@ -157,9 +157,9 @@ where
 
     // Process first two chunks now that we have all hashes
     for (chunk_index, chunk_data, chunk_size) in first_chunks {
-        let pki = get_pad_key_and_iv(chunk_index, &src_hash_buffer);
+        let pki = get_pad_key_and_nonce(chunk_index, &src_hash_buffer)?;
         let encrypted_content = crate::encrypt::encrypt_chunk(chunk_data, pki)?;
-        let dst_hash = XorName::from_content(&encrypted_content);
+        let dst_hash = crate::hash::content_hash(&encrypted_content);
 
         // Store chunk using the provided store function
         chunk_store(dst_hash, encrypted_content)?;
@@ -169,7 +169,11 @@ where
             ChunkInfo {
                 index: chunk_index,
                 dst_hash,
-                src_hash: src_hash_buffer[chunk_index],
+                src_hash: *src_hash_buffer.get(chunk_index).ok_or_else(|| {
+                    Error::Generic(format!(
+                        "chunk index {chunk_index} out of bounds for src_hash_buffer"
+                    ))
+                })?,
                 src_size: chunk_size,
             },
         );
@@ -391,7 +395,7 @@ mod tests {
 
         // Store all chunks
         for chunk in &all_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             store(hash, chunk.content.clone())?;
         }
 
@@ -483,7 +487,7 @@ mod tests {
         // Both should decrypt to same original data
         let mut standard_storage = HashMap::new();
         for chunk in standard_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = standard_storage.insert(hash, chunk.content.to_vec());
         }
 

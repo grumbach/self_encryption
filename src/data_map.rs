@@ -94,8 +94,8 @@ impl DataMap {
     }
 
     /// Returns the list of chunks pre and post encryption hashes if present.
-    pub fn infos(&self) -> Vec<ChunkInfo> {
-        self.chunk_identifiers.to_vec()
+    pub fn infos(&self) -> &[ChunkInfo] {
+        &self.chunk_identifiers
     }
 
     /// Returns the child value if set
@@ -136,7 +136,7 @@ impl Serialize for DataMap {
             #[derive(Serialize)]
             struct VersionedDataMap<'a> {
                 version: u8,
-                chunk_identifiers: &'a Vec<ChunkInfo>,
+                chunk_identifiers: &'a [ChunkInfo],
                 child: &'a Option<usize>,
             }
 
@@ -286,19 +286,26 @@ fn debug_bytes<V: AsRef<[u8]>>(input: V) -> String {
     if input_ref.len() <= 6 {
         let mut ret = String::new();
         for byte in input_ref.iter() {
-            write!(ret, "{byte:02x}").unwrap_or(());
+            let _ = write!(ret, "{byte:02x}");
         }
         return ret;
     }
-    format!(
-        "{:02x}{:02x}{:02x}..{:02x}{:02x}{:02x}",
-        input_ref[0],
-        input_ref[1],
-        input_ref[2],
-        input_ref[input_ref.len() - 3],
-        input_ref[input_ref.len() - 2],
-        input_ref[input_ref.len() - 1]
-    )
+    match (input_ref.first(), input_ref.get(1), input_ref.get(2)) {
+        (Some(a), Some(b), Some(c)) => {
+            let len = input_ref.len();
+            match (
+                input_ref.get(len - 3),
+                input_ref.get(len - 2),
+                input_ref.get(len - 1),
+            ) {
+                (Some(x), Some(y), Some(z)) => {
+                    format!("{a:02x}{b:02x}{c:02x}..{x:02x}{y:02x}{z:02x}")
+                }
+                _ => "<error>".to_owned(),
+            }
+        }
+        _ => "<error>".to_owned(),
+    }
 }
 
 impl Debug for ChunkInfo {
@@ -323,8 +330,8 @@ mod tests {
     fn create_test_chunk_info(index: usize) -> ChunkInfo {
         ChunkInfo {
             index,
-            dst_hash: XorName::from_content(format!("dst_{index}").as_bytes()),
-            src_hash: XorName::from_content(format!("src_{index}").as_bytes()),
+            dst_hash: crate::hash::content_hash(format!("dst_{index}").as_bytes()),
+            src_hash: crate::hash::content_hash(format!("src_{index}").as_bytes()),
             src_size: 1024 * (index + 1),
         }
     }
@@ -515,7 +522,10 @@ mod tests {
 
         // Store the shrunk chunks
         for chunk in &shrunk_chunks {
-            let _ = storage.insert(XorName::from_content(&chunk.content), chunk.content.clone());
+            let _ = storage.insert(
+                crate::hash::content_hash(&chunk.content),
+                chunk.content.clone(),
+            );
         }
 
         // Verify the shrunk data map has the new format
