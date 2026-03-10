@@ -100,7 +100,6 @@ pub mod hash;
 mod python;
 mod stream_decrypt;
 mod stream_encrypt;
-mod stream_file;
 pub mod test_helpers;
 mod utils;
 
@@ -114,7 +113,6 @@ pub use self::{
     error::{Error, Result},
     stream_decrypt::{streaming_decrypt, DecryptionStream},
     stream_encrypt::{stream_encrypt, ChunkStream, EncryptionStream},
-    stream_file::streaming_decrypt_from_storage,
 };
 use bytes::Bytes;
 use std::{

@@ -1,7 +1,6 @@
 use crate::{
     decrypt_from_storage as rust_decrypt_from_storage, encrypt_from_file as rust_encrypt_from_file,
-    streaming_decrypt_from_storage as rust_streaming_decrypt_from_storage, ChunkInfo, DataMap,
-    EncryptedChunk, XorName,
+    ChunkInfo, DataMap, EncryptedChunk, XorName,
 };
 use bytes::Bytes;
 use pyo3::prelude::*;
@@ -399,6 +398,8 @@ pub fn streaming_decrypt_from_storage(
     output_file: &str,
     get_chunks: Bound<'_, PyAny>,
 ) -> PyResult<()> {
+    use std::io::Write;
+
     let output_path = Path::new(output_file);
     let get_chunks_wrapper = |names: &[(usize, XorName)]| -> crate::Result<Vec<(usize, Bytes)>> {
         let name_strs: Vec<(usize, String)> =
@@ -414,7 +415,6 @@ pub fn streaming_decrypt_from_storage(
             let chunk = chunk
                 .map_err(|e| crate::Error::Python(format!("Failed to iterate chunks: {e}")))?;
 
-            // Downcast to individual components instead of tuple
             let chunk_tuple = chunk
                 .downcast::<PyTuple>()
                 .map_err(|e| crate::Error::Python(format!("get_chunks must return tuple: {e}")))?;
@@ -442,9 +442,21 @@ pub fn streaming_decrypt_from_storage(
         Ok(result)
     };
 
-    rust_streaming_decrypt_from_storage(&data_map.inner, output_path, get_chunks_wrapper).map_err(
-        |e| pyo3::exceptions::PyOSError::new_err(format!("Streaming decryption failed: {e}")),
-    )
+    // Use streaming_decrypt internally, writing output to file
+    let stream = crate::streaming_decrypt(&data_map.inner, get_chunks_wrapper)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Streaming decryption failed: {e}")))?;
+
+    let mut file = std::fs::File::create(output_path)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Failed to create output file: {e}")))?;
+
+    for chunk_result in stream {
+        let chunk = chunk_result
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Decryption error: {e}")))?;
+        file.write_all(&chunk)
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Write error: {e}")))?;
+    }
+
+    Ok(())
 }
 
 /// Initialize the Python module.

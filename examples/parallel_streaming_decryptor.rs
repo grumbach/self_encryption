@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use clap::Parser;
 use rayon::prelude::*;
-use self_encryption::{deserialize, streaming_decrypt_from_storage, DataMap, Error, Result};
-use std::{fs::File, io::Read, path::Path};
+use self_encryption::{deserialize, streaming_decrypt, DataMap, Error, Result};
+use std::{fs::File, io::{Read, Write}, path::Path};
 use xor_name::XorName;
 
 /// Parallel streaming decryptor for self-encrypted files
@@ -23,7 +23,6 @@ struct Args {
 }
 
 fn validate_paths(args: &Args) -> Result<()> {
-    // Check data map file exists and is readable
     if !Path::new(&args.data_map).exists() {
         return Err(Error::Generic(format!(
             "Data map file does not exist: {}",
@@ -31,7 +30,6 @@ fn validate_paths(args: &Args) -> Result<()> {
         )));
     }
 
-    // Check chunks directory exists and is readable
     let chunks_dir = Path::new(&args.chunks_dir);
     if !chunks_dir.exists() {
         return Err(Error::Generic(format!(
@@ -46,7 +44,6 @@ fn validate_paths(args: &Args) -> Result<()> {
         )));
     }
 
-    // Check output parent directory exists and is writable
     let output_path = Path::new(&args.output);
     if let Some(parent) = output_path.parent() {
         if !parent.exists() {
@@ -55,7 +52,6 @@ fn validate_paths(args: &Args) -> Result<()> {
                 parent.display()
             )));
         }
-        // Try to verify write permissions
         if !parent
             .metadata()
             .map(|m| m.permissions().readonly())
@@ -74,13 +70,10 @@ fn validate_paths(args: &Args) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Validate all paths before proceeding
     validate_paths(&args)?;
 
-    // Load the data map from file
     let data_map = load_data_map(&args.data_map)?;
 
-    // Implement the parallel chunk retrieval function
     let get_chunk_parallel = |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
         hashes
             .par_iter()
@@ -95,15 +88,24 @@ fn main() -> Result<()> {
             .collect()
     };
 
-    // Use the streaming decryption function
-    streaming_decrypt_from_storage(&data_map, Path::new(&args.output), get_chunk_parallel)?;
+    // Use the streaming decryption iterator
+    let stream = streaming_decrypt(&data_map, get_chunk_parallel)?;
+
+    let mut output_file = File::create(&args.output)
+        .map_err(|e| Error::Generic(format!("Failed to create output file: {e}")))?;
+
+    for chunk_result in stream {
+        let chunk = chunk_result?;
+        output_file
+            .write_all(&chunk)
+            .map_err(|e| Error::Generic(format!("Failed to write output: {e}")))?;
+    }
 
     println!("Successfully decrypted file to: {}", args.output);
 
     Ok(())
 }
 
-// Helper function to load data map from a file
 fn load_data_map(path: &str) -> Result<DataMap> {
     let mut file =
         File::open(path).map_err(|e| Error::Generic(format!("Failed to open data map: {e}")))?;

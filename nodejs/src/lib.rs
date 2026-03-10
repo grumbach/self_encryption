@@ -321,11 +321,12 @@ pub fn streaming_decrypt_from_storage(
     output_file: String,
     #[napi(ts_arg_type = "(xorNames: XorName[]) => Uint8Array")] get_chunk_parallel: JsFunction,
 ) -> Result<()> {
+    use std::io::Write;
+
     let output_path = Path::new(&output_file);
 
     let get_chunk_parallel_wrapper =
         |xor_name: &[(usize, self_encryption::XorName)]| -> self_encryption::Result<Vec<(usize, Bytes)>> {
-            // `Vec<XorName>` -> `Vec<JsXorName> -> `Vec<JsUnknown>`
             let xor_names = xor_name
                 .iter()
                 .map(|(_i, xor_name)| {
@@ -335,19 +336,16 @@ pub fn streaming_decrypt_from_storage(
                 })
                 .collect::<Vec<_>>();
 
-            // `Vec<JsUnknown>` -> JS `Array` -> `JsObject` -> `JsUnknown`
             let xor_names = Array::from_vec(&env, xor_names)
                 .map_err(|e| {
                     self_encryption::Error::Generic(format!("Could not create array: {e}\n"))
                 })?
-                // Map JS `Array` to `JsObject` (as `Array` can not be converted to `JsUnknown`)
                 .coerce_to_object()
                 .map_err(|e| {
                     self_encryption::Error::Generic(format!("Could not create array: {e}\n"))
                 })?
                 .into_unknown();
 
-            // Call the JavaScript function with the XOR names
             let result = get_chunk_parallel.call(None, &[xor_names]).map_err(|e| {
                 self_encryption::Error::Generic(format!(
                     "`getChunkParallel` call resulted in error: {e}\n"
@@ -384,12 +382,22 @@ pub fn streaming_decrypt_from_storage(
             Ok(data_vec)
         };
 
-    self_encryption::streaming_decrypt_from_storage(
-        &data_map.0,
-        output_path,
-        get_chunk_parallel_wrapper,
-    )
-    .map_err(map_error)
+    // Use streaming_decrypt internally, writing output to file
+    let stream = self_encryption::streaming_decrypt(&data_map.0, get_chunk_parallel_wrapper)
+        .map_err(map_error)?;
+
+    let mut file = std::fs::File::create(output_path).map_err(|e| {
+        napi::Error::new(Status::GenericFailure, format!("Failed to create output file: {e}"))
+    })?;
+
+    for chunk_result in stream {
+        let chunk = chunk_result.map_err(map_error)?;
+        file.write_all(&chunk).map_err(|e| {
+            napi::Error::new(Status::GenericFailure, format!("Write error: {e}"))
+        })?;
+    }
+
+    Ok(())
 }
 
 // Reads a file in chunks, encrypts them, and stores them using a provided functor. Returns a DataMap.
