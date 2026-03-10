@@ -1,6 +1,4 @@
-use crate::{
-    decrypt_from_storage as rust_decrypt_from_storage, ChunkInfo, DataMap, EncryptedChunk, XorName,
-};
+use crate::{ChunkInfo, DataMap, EncryptedChunk, XorName};
 use bytes::Bytes;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyInt, PyTuple};
@@ -404,19 +402,39 @@ pub fn decrypt_from_storage(
     get_chunk: Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let output_path = Path::new(output_file);
-    let get_chunk_wrapper = |name: XorName| -> crate::Result<Bytes> {
-        let name_str = hex::encode(name.0);
-        let chunk = get_chunk
-            .call1((name_str,))
-            .map_err(|e| crate::Error::Python(format!("Failed to call get_chunk: {e}")))?;
-        let bytes = chunk
-            .downcast::<PyBytes>()
-            .map_err(|e| crate::Error::Python(format!("get_chunk must return bytes: {e}")))?;
-        Ok(Bytes::copy_from_slice(bytes.as_bytes()))
-    };
 
-    rust_decrypt_from_storage(&data_map.inner, output_path, get_chunk_wrapper)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Decryption failed: {e}")))
+    // Wrap the single-chunk callback into a parallel batch callback for streaming_decrypt
+    let get_chunk_parallel =
+        |hashes: &[(usize, XorName)]| -> crate::Result<Vec<(usize, Bytes)>> {
+            hashes
+                .iter()
+                .map(|(i, hash)| {
+                    let name_str = hex::encode(hash.0);
+                    let chunk = get_chunk.call1((name_str,)).map_err(|e| {
+                        crate::Error::Python(format!("Failed to call get_chunk: {e}"))
+                    })?;
+                    let bytes = chunk.downcast::<PyBytes>().map_err(|e| {
+                        crate::Error::Python(format!("get_chunk must return bytes: {e}"))
+                    })?;
+                    Ok((*i, Bytes::copy_from_slice(bytes.as_bytes())))
+                })
+                .collect()
+        };
+
+    let stream = crate::streaming_decrypt(&data_map.inner, &get_chunk_parallel)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Decryption failed: {e}")))?;
+
+    let mut output = std::fs::File::create(output_path)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Failed to create output: {e}")))?;
+
+    for chunk_result in stream {
+        let chunk = chunk_result
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Decryption failed: {e}")))?;
+        std::io::Write::write_all(&mut output, &chunk)
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Write failed: {e}")))?;
+    }
+
+    Ok(())
 }
 
 /// Decrypt data using streaming for better performance with large files.

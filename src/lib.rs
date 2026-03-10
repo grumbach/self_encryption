@@ -115,7 +115,7 @@ pub use self::{
     stream_encrypt::{stream_encrypt, ChunkStream, EncryptionStream},
 };
 use bytes::Bytes;
-use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::LazyLock};
+use std::{collections::HashMap, sync::LazyLock};
 
 // export these because they are used in our public API.
 pub use bytes;
@@ -441,38 +441,6 @@ where
 }
 
 /// Decrypts data using chunks retrieved from any storage backend via the provided retrieval function.
-/// Writes the decrypted output to the specified file path.
-pub fn decrypt_from_storage<F>(
-    data_map: &DataMap,
-    output_filepath: &Path,
-    mut get_chunk: F,
-) -> Result<()>
-where
-    F: FnMut(XorName) -> Result<Bytes>,
-{
-    let root_map = if data_map.is_child() {
-        get_root_data_map(data_map.clone(), &mut get_chunk)?
-    } else {
-        data_map.clone()
-    };
-    let mut encrypted_chunks = Vec::new();
-    for chunk_info in root_map.infos() {
-        let chunk_data = get_chunk(chunk_info.dst_hash)?;
-        encrypted_chunks.push(EncryptedChunk {
-            content: chunk_data,
-        });
-    }
-
-    let decrypted_content = decrypt_full_set(&root_map, &encrypted_chunks)?;
-    File::create(output_filepath)
-        .map_err(Error::from)?
-        .write_all(&decrypted_content)
-        .map_err(Error::from)?;
-
-    Ok(())
-}
-
-/// Decrypts data using chunks retrieved from any storage backend via the provided retrieval function.
 pub fn decrypt(data_map: &DataMap, chunks: &[EncryptedChunk]) -> Result<Bytes> {
     // Create a mapping of chunk hashes to chunks for efficient lookup
     let chunk_map: HashMap<XorName, &EncryptedChunk> = chunks
@@ -658,7 +626,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::random_bytes;
     use std::{
-        io::{Read, Write},
+        io::Write,
         sync::{Arc, Mutex},
     };
     use tempfile::NamedTempFile;
@@ -781,24 +749,26 @@ mod tests {
             println!("Hash: {} (size: {})", hex::encode(hash), content.len());
         }
 
-        // Create output file for decryption
-        let output_file = tempfile::NamedTempFile::new()?;
-
-        // Create chunk retrieval function
+        // Create chunk retrieval function for streaming_decrypt
         let stored_clone = stored.clone();
-        let get_chunk = |hash: XorName| -> Result<Bytes> {
-            stored_clone
-                .get(&hash)
-                .map(|data| Bytes::from(data.clone()))
-                .ok_or_else(|| Error::Generic(format!("Missing chunk: {}", hex::encode(hash))))
-        };
+        let get_chunk_parallel =
+            |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
+                hashes
+                    .iter()
+                    .map(|(i, hash)| {
+                        stored_clone
+                            .get(hash)
+                            .map(|data| (*i, Bytes::from(data.clone())))
+                            .ok_or_else(|| {
+                                Error::Generic(format!("Missing chunk: {}", hex::encode(hash)))
+                            })
+                    })
+                    .collect()
+            };
 
-        // Decrypt using decrypt_from_storage
-        decrypt_from_storage(&shrunk_map, output_file.path(), get_chunk)?;
-
-        // Read and verify the decrypted data
-        let mut decrypted = Vec::new();
-        let _ = output_file.as_file().read_to_end(&mut decrypted)?;
+        // Decrypt using streaming_decrypt
+        let decrypt_stream = streaming_decrypt(&shrunk_map, &get_chunk_parallel)?;
+        let decrypted = decrypt_stream.range_full()?;
 
         assert_eq!(decrypted.len(), file_size);
         assert_eq!(&decrypted[..], &bytes[..]);
