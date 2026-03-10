@@ -114,7 +114,7 @@ pub use self::{
     error::{Error, Result},
     stream_decrypt::{streaming_decrypt, DecryptionStream},
     stream_encrypt::{stream_encrypt, ChunkStream, EncryptionStream},
-    stream_file::{streaming_decrypt_from_storage, streaming_encrypt_from_file},
+    stream_file::streaming_decrypt_from_storage,
 };
 use bytes::Bytes;
 use std::{
