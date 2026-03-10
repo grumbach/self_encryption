@@ -140,8 +140,8 @@ async fn main() {
     let mut data_map_file = chunk_store_dir;
     data_map_file.push("data_map");
 
-    if args.flag_encrypt && args.arg_target.is_some() {
-        if let Ok(mut file) = File::open(args.arg_target.clone().unwrap()) {
+    if let (true, Some(target)) = (args.flag_encrypt, args.arg_target.clone()) {
+        if let Ok(mut file) = File::open(&target) {
             let mut data = Vec::new();
             match file.read_to_end(&mut data) {
                 Ok(_) => (),
@@ -174,12 +174,16 @@ async fn main() {
                 }
             }
         } else {
-            println!("Failed to open {}", args.arg_target.clone().unwrap());
+            println!("Failed to open {target}");
         }
     }
 
-    if args.flag_decrypt && args.arg_target.is_some() && args.arg_destination.is_some() {
-        if let Ok(mut file) = File::open(args.arg_target.clone().unwrap()) {
+    if let (true, Some(target), Some(destination)) = (
+        args.flag_decrypt,
+        args.arg_target.clone(),
+        args.arg_destination.clone(),
+    ) {
+        if let Ok(mut file) = File::open(target) {
             let mut data = Vec::new();
             let _ = file.read_to_end(&mut data).unwrap();
             match deserialize::<DataMap>(&data) {
@@ -204,17 +208,17 @@ async fn main() {
                             (keys, chunks)
                         });
 
-                    if let Ok(mut file) = File::create(args.arg_destination.clone().unwrap()) {
+                    if let Ok(mut file) = File::create(&destination) {
                         let content =
                             decrypt(&DataMap::new(keys), encrypted_chunks.as_ref()).unwrap();
                         match file.write_all(&content[..]) {
                             Err(error) => println!("File write failed - {error:?}"),
                             Ok(_) => {
-                                println!("File decrypted to {:?}", args.arg_destination.unwrap())
+                                println!("File decrypted to {destination:?}")
                             }
                         };
                     } else {
-                        println!("Failed to create {}", (args.arg_destination.unwrap()));
+                        println!("Failed to create {destination}");
                     }
                 }
                 Err(_) => {
