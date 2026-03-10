@@ -400,29 +400,51 @@ pub fn streaming_encrypt_from_file(
     #[napi(ts_arg_type = "(xorName: XorName, bytes: Uint8Array) => undefined")]
     chunk_store: JsFunction,
 ) -> Result<DataMap> {
+    use std::io::Read;
+
     let file_path = Path::new(&file_path);
 
-    let chunk_store_wrapper = |xor_name: self_encryption::XorName,
-                               bytes: Bytes|
-     -> self_encryption::Result<()> {
-        let xor_name = XorName(xor_name);
-        let xor_name = unsafe { XorName::to_napi_value(env.raw(), xor_name) }.unwrap();
-        let xor_name = unsafe { napi::JsUnknown::from_napi_value(env.raw(), xor_name) }.unwrap();
+    let file = std::fs::File::open(file_path).map_err(map_error)?;
+    let data_size = file.metadata().map_err(map_error)?.len() as usize;
+    let mut reader = std::io::BufReader::new(file);
 
-        let bytes = Uint8Array::from(bytes.to_vec());
-        let bytes = unsafe { Uint8Array::to_napi_value(env.raw(), bytes) }.unwrap();
-        let bytes = unsafe { napi::JsUnknown::from_napi_value(env.raw(), bytes) }.unwrap();
+    // Create iterator that reads file in chunks
+    let data_iter = std::iter::from_fn(move || {
+        let mut buffer = vec![0u8; 8192];
+        match reader.read(&mut buffer) {
+            Ok(0) => None,
+            Ok(n) => {
+                buffer.truncate(n);
+                Some(Bytes::from(buffer))
+            }
+            Err(_) => None,
+        }
+    });
 
-        let _ = chunk_store.call(None, &[xor_name, bytes]).map_err(|e| {
-            self_encryption::Error::Generic(format!("`chunkStore` call resulted in error: {e}\n"))
+    let mut stream = self_encryption::stream_encrypt(data_size, data_iter).map_err(map_error)?;
+
+    // Iterate chunks and call the JS chunk_store callback
+    for chunk_result in stream.chunks() {
+        let (hash, content) = chunk_result.map_err(map_error)?;
+
+        let xor_name = XorName(hash);
+        let xor_name_val = unsafe { XorName::to_napi_value(env.raw(), xor_name) }.unwrap();
+        let xor_name_js = unsafe { napi::JsUnknown::from_napi_value(env.raw(), xor_name_val) }.unwrap();
+
+        let bytes = Uint8Array::from(content.to_vec());
+        let bytes_val = unsafe { Uint8Array::to_napi_value(env.raw(), bytes) }.unwrap();
+        let bytes_js = unsafe { napi::JsUnknown::from_napi_value(env.raw(), bytes_val) }.unwrap();
+
+        let _ = chunk_store.call(None, &[xor_name_js, bytes_js]).map_err(|e| {
+            napi::Error::new(Status::GenericFailure, format!("`chunkStore` call resulted in error: {e}\n"))
         })?;
+    }
 
-        Ok(())
-    };
+    let datamap = stream.into_datamap().ok_or_else(|| {
+        napi::Error::new(Status::GenericFailure, "Encryption did not produce a DataMap")
+    })?;
 
-    self_encryption::streaming_encrypt_from_file(file_path, chunk_store_wrapper)
-        .map(DataMap)
-        .map_err(map_error)
+    Ok(DataMap(datamap))
 }
 
 /// Encrypt a file and store its chunks.

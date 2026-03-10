@@ -2,7 +2,7 @@ use bytes::Bytes;
 use rayon::prelude::*;
 use self_encryption::{
     decrypt, decrypt_from_storage, encrypt, encrypt_from_file, get_root_data_map, shrink_data_map,
-    stream_encrypt, streaming_decrypt, streaming_decrypt_from_storage, streaming_encrypt_from_file,
+    stream_encrypt, streaming_decrypt, streaming_decrypt_from_storage,
     test_helpers::random_bytes, verify_chunk, DataMap, EncryptedChunk, Error, Result,
 };
 use std::{
@@ -936,39 +936,35 @@ fn test_stream_encrypt_decrypt_roundtrip() -> Result<()> {
     Ok(())
 }
 
-// --- Task 6: streaming_encrypt_from_file + streaming_decrypt_from_storage roundtrip ---
+// --- Task 6: stream_encrypt + streaming_decrypt_from_storage roundtrip ---
 
 #[test]
 fn test_file_stream_encrypt_decrypt_roundtrip() -> Result<()> {
     let data_size = 200_000;
     let original_data = random_bytes(data_size);
 
-    let mut temp_input = NamedTempFile::new()?;
-    temp_input.write_all(&original_data)?;
+    let mut stream = stream_encrypt(
+        data_size,
+        original_data.chunks(8192).map(|c| Bytes::from(c.to_vec())),
+    )?;
 
-    let storage = Arc::new(Mutex::new(HashMap::new()));
-    let storage_clone = storage.clone();
+    let mut storage = HashMap::new();
+    for chunk_result in stream.chunks() {
+        let (hash, content) = chunk_result?;
+        let _ = storage.insert(hash, content.to_vec());
+    }
 
-    let store = move |hash: XorName, content: Bytes| -> Result<()> {
-        storage_clone
-            .lock()
-            .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
-            .insert(hash, content.to_vec());
-        Ok(())
-    };
-
-    let data_map = streaming_encrypt_from_file(temp_input.path(), store)?;
+    let data_map = stream
+        .datamap()
+        .ok_or_else(|| Error::Generic("No DataMap".to_string()))?
+        .clone();
 
     let temp_output = NamedTempFile::new()?;
-    let stored = storage
-        .lock()
-        .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
-        .clone();
 
     let fetcher = |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
         let mut results = Vec::new();
         for &(index, hash) in hashes {
-            let data = stored
+            let data = storage
                 .get(&hash)
                 .ok_or_else(|| Error::Generic(format!("Chunk not found: {}", hex::encode(hash))))?;
             results.push((index, Bytes::from(data.clone())));
@@ -1034,28 +1030,23 @@ fn test_file_encrypt_stream_decrypt_cross() -> Result<()> {
     let data_size = 150_000;
     let original_data = random_bytes(data_size);
 
-    let mut temp_input = NamedTempFile::new()?;
-    temp_input.write_all(&original_data)?;
+    let mut stream = stream_encrypt(
+        data_size,
+        original_data.chunks(8192).map(|c| Bytes::from(c.to_vec())),
+    )?;
 
-    let storage = Arc::new(Mutex::new(HashMap::new()));
-    let storage_clone = storage.clone();
+    let mut storage = HashMap::new();
+    for chunk_result in stream.chunks() {
+        let (hash, content) = chunk_result?;
+        let _ = storage.insert(hash, content.to_vec());
+    }
 
-    let store = move |hash: XorName, content: Bytes| -> Result<()> {
-        storage_clone
-            .lock()
-            .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
-            .insert(hash, content.to_vec());
-        Ok(())
-    };
-
-    let data_map = streaming_encrypt_from_file(temp_input.path(), store)?;
-
-    let stored = storage
-        .lock()
-        .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
+    let data_map = stream
+        .datamap()
+        .ok_or_else(|| Error::Generic("No DataMap".to_string()))?
         .clone();
 
-    let fetcher = make_parallel_fetcher(&stored);
+    let fetcher = make_parallel_fetcher(&storage);
     let decrypt_stream = streaming_decrypt(&data_map, fetcher)?;
     let decrypted = decrypt_stream.range_full()?;
 
@@ -1156,32 +1147,28 @@ fn test_large_file_streaming_roundtrip() -> Result<()> {
     let data_size = 20 * 1024 * 1024; // 20MB
     let original_data = random_bytes(data_size);
 
-    let mut temp_input = NamedTempFile::new()?;
-    temp_input.write_all(&original_data)?;
+    let mut stream = stream_encrypt(
+        data_size,
+        original_data.chunks(8192).map(|c| Bytes::from(c.to_vec())),
+    )?;
 
-    let storage = Arc::new(Mutex::new(HashMap::new()));
-    let storage_clone = storage.clone();
+    let mut storage = HashMap::new();
+    for chunk_result in stream.chunks() {
+        let (hash, content) = chunk_result?;
+        let _ = storage.insert(hash, content.to_vec());
+    }
 
-    let store = move |hash: XorName, content: Bytes| -> Result<()> {
-        storage_clone
-            .lock()
-            .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
-            .insert(hash, content.to_vec());
-        Ok(())
-    };
-
-    let data_map = streaming_encrypt_from_file(temp_input.path(), store)?;
+    let data_map = stream
+        .datamap()
+        .ok_or_else(|| Error::Generic("No DataMap".to_string()))?
+        .clone();
 
     let temp_output = NamedTempFile::new()?;
-    let stored = storage
-        .lock()
-        .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
-        .clone();
 
     let fetcher = |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
         let mut results = Vec::new();
         for &(index, hash) in hashes {
-            let data = stored
+            let data = storage
                 .get(&hash)
                 .ok_or_else(|| Error::Generic(format!("Chunk not found: {}", hex::encode(hash))))?;
             results.push((index, Bytes::from(data.clone())));
