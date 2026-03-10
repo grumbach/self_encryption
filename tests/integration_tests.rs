@@ -1,10 +1,35 @@
 use bytes::Bytes;
 use rayon::prelude::*;
 use self_encryption::{
-    decrypt, decrypt_from_storage, encrypt, encrypt_from_file, get_root_data_map, shrink_data_map,
-    stream_encrypt, streaming_decrypt,
-    test_helpers::random_bytes, verify_chunk, DataMap, EncryptedChunk, Error, Result,
+    decrypt, decrypt_from_storage, encrypt, get_root_data_map, shrink_data_map, stream_encrypt,
+    streaming_decrypt, test_helpers::random_bytes, verify_chunk, DataMap, EncryptedChunk, Error,
+    Result,
 };
+
+/// Helper: encrypt a file and write chunks to an output directory (replaces removed encrypt_from_file)
+fn encrypt_file_to_dir(
+    file_path: &std::path::Path,
+    output_dir: &std::path::Path,
+) -> Result<(DataMap, Vec<XorName>)> {
+    let mut file = File::open(file_path)?;
+    let mut bytes = Vec::new();
+    let _ = file.read_to_end(&mut bytes)?;
+    let bytes = Bytes::from(bytes);
+
+    let (data_map, encrypted_chunks) = encrypt(bytes)?;
+
+    let mut chunk_names = Vec::new();
+    for chunk in encrypted_chunks {
+        let chunk_name = self_encryption::hash::content_hash(&chunk.content);
+        chunk_names.push(chunk_name);
+
+        let chunk_path = output_dir.join(hex::encode(chunk_name));
+        let mut output_file = File::create(chunk_path)?;
+        output_file.write_all(&chunk.content)?;
+    }
+
+    Ok((data_map, chunk_names))
+}
 use std::{
     collections::HashMap,
     fs::File,
@@ -145,7 +170,7 @@ fn test_cross_backend_encryption_decryption() -> Result<()> {
         input_file.write_all(&original_data)?;
 
         storage.debug_storage_state("Before encryption")?;
-        let (data_map, _) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
+        let (data_map, _) = encrypt_file_to_dir(&input_path, storage.disk_dir.path())?;
         println!("Encrypted into {} chunks", data_map.len());
         storage.debug_storage_state("After encryption")?;
 
@@ -184,7 +209,7 @@ fn test_large_file_cross_backend() -> Result<()> {
     input_file.write_all(&original_data)?;
 
     storage.debug_storage_state("Before encryption")?;
-    let (data_map, _) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
+    let (data_map, _) = encrypt_file_to_dir(&input_path, storage.disk_dir.path())?;
 
     // Explicitly store chunks in memory
     let mut store_fn = storage.store_to_memory();
@@ -249,7 +274,7 @@ fn test_concurrent_backend_access() -> Result<()> {
         File::create(&input_path)?.write_all(&data)?;
 
         // Encrypt using memory backend
-        let (data_map, _) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
+        let (data_map, _) = encrypt_file_to_dir(&input_path, storage.disk_dir.path())?;
 
         // Verify storage after each operation
         let mut store_fn = storage.store_to_disk();
@@ -285,7 +310,7 @@ fn test_error_handling_across_backends() -> Result<()> {
     File::create(&input_path)?.write_all(&data)?;
 
     // Encrypt normally
-    let (data_map, _) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
+    let (data_map, _) = encrypt_file_to_dir(&input_path, storage.disk_dir.path())?;
 
     // Test failing store function
     let mut failing_store: StoreFn =
@@ -330,7 +355,7 @@ fn test_cross_platform_compatibility() -> Result<()> {
         input_file.write_all(&original_data)?;
 
         storage.debug_storage_state("Before encryption")?;
-        let (data_map, _) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
+        let (data_map, _) = encrypt_file_to_dir(&input_path, storage.disk_dir.path())?;
 
         // Store in both backends
         let mut memory_store = storage.store_to_memory();
@@ -423,7 +448,7 @@ fn test_encrypt_from_file_stores_all_chunks() -> Result<()> {
     let expected_chunk_count = expected_chunks.len();
 
     // Now encrypt from file
-    let (data_map, chunk_names) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
+    let (data_map, chunk_names) = encrypt_file_to_dir(&input_path, storage.disk_dir.path())?;
 
     println!("Expected chunks: {expected_chunk_count}");
     println!("Got chunk names: {}", chunk_names.len());
@@ -479,7 +504,7 @@ fn test_comprehensive_encryption_decryption() -> Result<()> {
         println!("\n2. Testing file-based encryption (encrypt_from_file):");
         let input_path = temp_dir.path().join(format!("input_{size_name}.dat"));
         File::create(&input_path)?.write_all(&original_data)?;
-        let (data_map2, chunk_names) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
+        let (data_map2, chunk_names) = encrypt_file_to_dir(&input_path, storage.disk_dir.path())?;
         println!("- Generated {} chunks", chunk_names.len());
         println!("- Data map child level: {:?}", data_map2.child());
 
@@ -546,7 +571,7 @@ fn test_comprehensive_encryption_decryption() -> Result<()> {
         println!("✓ streaming_decrypt() successful");
 
         // D. Test decrypt() with file-based encryption result
-        println!("\nB.1 Testing decrypt() with encrypt_from_file() result:");
+        println!("\nB.1 Testing decrypt() with encrypt_file_to_dir() result:");
         let mut file_chunks = Vec::new();
         for hash in &chunk_names {
             let chunk_path = storage.disk_dir.path().join(hex::encode(hash));
@@ -560,12 +585,12 @@ fn test_comprehensive_encryption_decryption() -> Result<()> {
         assert_eq!(
             original_data.as_ref(),
             decrypted2.as_ref(),
-            "Mismatch: encrypt_from_file() -> decrypt()"
+            "Mismatch: encrypt_file_to_dir() -> decrypt()"
         );
         println!("✓ decrypt() successful");
 
         // E. Test decrypt_from_storage() with file-based encryption result
-        println!("\nB.2 Testing decrypt_from_storage() with encrypt_from_file() result:");
+        println!("\nB.2 Testing decrypt_from_storage() with encrypt_file_to_dir() result:");
         let output_path2 = temp_dir.path().join(format!("output2_{size_name}.dat"));
         let mut retrieve_fn = storage.retrieve_from_disk();
         decrypt_from_storage(&data_map2, &output_path2, &mut retrieve_fn)?;
@@ -575,18 +600,18 @@ fn test_comprehensive_encryption_decryption() -> Result<()> {
         assert_eq!(
             original_data.as_ref(),
             decrypted.as_slice(),
-            "Mismatch: encrypt_from_file() -> decrypt_from_storage()"
+            "Mismatch: encrypt_file_to_dir() -> decrypt_from_storage()"
         );
         println!("✓ decrypt_from_storage() successful");
 
         // F. Test streaming_decrypt() with file-based encryption result
-        println!("\nB.3 Testing streaming_decrypt() with encrypt_from_file() result:");
+        println!("\nB.3 Testing streaming_decrypt() with encrypt_file_to_dir() result:");
         let decrypt_stream2 = streaming_decrypt(&data_map2, get_chunk_parallel)?;
         let decrypted = decrypt_stream2.range_full()?;
         assert_eq!(
             original_data.as_ref(),
             decrypted.as_ref(),
-            "Mismatch: encrypt_from_file() -> streaming_decrypt()"
+            "Mismatch: encrypt_file_to_dir() -> streaming_decrypt()"
         );
         println!("✓ streaming_decrypt() successful");
 
@@ -615,10 +640,7 @@ fn test_comprehensive_encryption_decryption() -> Result<()> {
         println!("✓ Chunk counts match");
 
         // Verify output files are identical
-        let outputs = [
-            output_path1,
-            output_path2,
-        ];
+        let outputs = [output_path1, output_path2];
         for (i, path1) in outputs.iter().enumerate() {
             for path2 in outputs.iter().skip(i + 1) {
                 let mut content1 = Vec::new();
@@ -651,7 +673,7 @@ fn test_streaming_decrypt_with_parallel_retrieval() -> Result<()> {
     File::create(&input_path)?.write_all(&data)?;
 
     // Encrypt and store chunks to disk
-    let (data_map, _) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
+    let (data_map, _) = encrypt_file_to_dir(&input_path, storage.disk_dir.path())?;
 
     // Implement parallel chunk retrieval function
     let chunk_dir = storage.disk_dir.path().to_owned();
@@ -744,7 +766,7 @@ fn test_chunk_verification() -> Result<()> {
     File::create(&input_path)?.write_all(&data)?;
 
     // Encrypt file to get some chunks
-    let (data_map, _) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
+    let (data_map, _) = encrypt_file_to_dir(&input_path, storage.disk_dir.path())?;
 
     // Get the first chunk info and content
     let first_chunk_info = data_map

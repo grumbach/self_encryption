@@ -387,14 +387,16 @@ pub fn streaming_decrypt_from_storage(
         .map_err(map_error)?;
 
     let mut file = std::fs::File::create(output_path).map_err(|e| {
-        napi::Error::new(Status::GenericFailure, format!("Failed to create output file: {e}"))
+        napi::Error::new(
+            Status::GenericFailure,
+            format!("Failed to create output file: {e}"),
+        )
     })?;
 
     for chunk_result in stream {
         let chunk = chunk_result.map_err(map_error)?;
-        file.write_all(&chunk).map_err(|e| {
-            napi::Error::new(Status::GenericFailure, format!("Write error: {e}"))
-        })?;
+        file.write_all(&chunk)
+            .map_err(|e| napi::Error::new(Status::GenericFailure, format!("Write error: {e}")))?;
     }
 
     Ok(())
@@ -437,19 +439,28 @@ pub fn streaming_encrypt_from_file(
 
         let xor_name = XorName(hash);
         let xor_name_val = unsafe { XorName::to_napi_value(env.raw(), xor_name) }.unwrap();
-        let xor_name_js = unsafe { napi::JsUnknown::from_napi_value(env.raw(), xor_name_val) }.unwrap();
+        let xor_name_js =
+            unsafe { napi::JsUnknown::from_napi_value(env.raw(), xor_name_val) }.unwrap();
 
         let bytes = Uint8Array::from(content.to_vec());
         let bytes_val = unsafe { Uint8Array::to_napi_value(env.raw(), bytes) }.unwrap();
         let bytes_js = unsafe { napi::JsUnknown::from_napi_value(env.raw(), bytes_val) }.unwrap();
 
-        let _ = chunk_store.call(None, &[xor_name_js, bytes_js]).map_err(|e| {
-            napi::Error::new(Status::GenericFailure, format!("`chunkStore` call resulted in error: {e}\n"))
-        })?;
+        let _ = chunk_store
+            .call(None, &[xor_name_js, bytes_js])
+            .map_err(|e| {
+                napi::Error::new(
+                    Status::GenericFailure,
+                    format!("`chunkStore` call resulted in error: {e}\n"),
+                )
+            })?;
     }
 
     let datamap = stream.into_datamap().ok_or_else(|| {
-        napi::Error::new(Status::GenericFailure, "Encryption did not produce a DataMap")
+        napi::Error::new(
+            Status::GenericFailure,
+            "Encryption did not produce a DataMap",
+        )
     })?;
 
     Ok(DataMap(datamap))
@@ -461,13 +472,55 @@ pub fn streaming_encrypt_from_file(
 /// and stores them in the specified directory.
 #[napi]
 pub fn encrypt_from_file(input_file: String, output_dir: String) -> Result<EncryptFromFileResult> {
+    use std::io::{Read, Write};
+
     let input_path = Path::new(&input_file);
     let output_path = Path::new(&output_dir);
 
-    let (data_map, chunk_names) =
-        self_encryption::encrypt_from_file(input_path, output_path).map_err(map_error)?;
+    let file = std::fs::File::open(input_path).map_err(map_error)?;
+    let data_size = file.metadata().map_err(map_error)?.len() as usize;
+    let mut reader = std::io::BufReader::new(file);
 
-    let chunk_names = chunk_names.iter().map(|name| hex::encode(name.0)).collect();
+    let data_iter = std::iter::from_fn(move || {
+        let mut buffer = vec![0u8; 8192];
+        match reader.read(&mut buffer) {
+            Ok(0) => None,
+            Ok(n) => {
+                buffer.truncate(n);
+                Some(Bytes::from(buffer))
+            }
+            Err(_) => None,
+        }
+    });
+
+    let mut stream = self_encryption::stream_encrypt(data_size, data_iter).map_err(map_error)?;
+
+    let mut chunk_names = Vec::new();
+    for chunk_result in stream.chunks() {
+        let (hash, content) = chunk_result.map_err(map_error)?;
+        chunk_names.push(hex::encode(hash.0));
+
+        let chunk_path = output_path.join(hex::encode(hash));
+        let mut output_file = std::fs::File::create(&chunk_path).map_err(|e| {
+            napi::Error::new(
+                Status::GenericFailure,
+                format!("Failed to create chunk file: {e}"),
+            )
+        })?;
+        output_file.write_all(&content).map_err(|e| {
+            napi::Error::new(
+                Status::GenericFailure,
+                format!("Failed to write chunk: {e}"),
+            )
+        })?;
+    }
+
+    let data_map = stream.into_datamap().ok_or_else(|| {
+        napi::Error::new(
+            Status::GenericFailure,
+            "Encryption did not produce a DataMap",
+        )
+    })?;
 
     Ok(EncryptFromFileResult {
         data_map,

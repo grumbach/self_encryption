@@ -115,13 +115,7 @@ pub use self::{
     stream_encrypt::{stream_encrypt, ChunkStream, EncryptionStream},
 };
 use bytes::Bytes;
-use std::{
-    collections::HashMap,
-    fs::File,
-    io::{Read, Write},
-    path::Path,
-    sync::LazyLock,
-};
+use std::{collections::HashMap, fs::File, io::Write, path::Path, sync::LazyLock};
 
 // export these because they are used in our public API.
 pub use bytes;
@@ -155,32 +149,6 @@ pub const MIN_CHUNK_SIZE: usize = 1;
 /// Controls the compression-speed vs compression-density tradeoffs.  The higher the quality, the
 /// slower the compression.  Range is 0 to 11.
 pub const COMPRESSION_QUALITY: i32 = 6;
-
-/// Read a file from the disk to encrypt, and output the chunks to a given output directory if presents.
-pub fn encrypt_from_file(file_path: &Path, output_dir: &Path) -> Result<(DataMap, Vec<XorName>)> {
-    let mut file = File::open(file_path)?;
-    let mut bytes = Vec::new();
-    let _ = file.read_to_end(&mut bytes)?;
-    let bytes = Bytes::from(bytes);
-
-    // First encrypt the data to get all chunks
-    let (data_map, encrypted_chunks) = encrypt(bytes)?;
-
-    // Track all chunk names
-    let mut chunk_names = Vec::new();
-
-    // Store all chunks to disk
-    for chunk in encrypted_chunks {
-        let chunk_name = hash::content_hash(&chunk.content);
-        chunk_names.push(chunk_name);
-
-        let file_path = output_dir.join(hex::encode(chunk_name));
-        let mut output_file = File::create(file_path)?;
-        output_file.write_all(&chunk.content)?;
-    }
-
-    Ok((data_map, chunk_names))
-}
 
 /// Encrypts a set of bytes and returns the encrypted data together with
 /// the data map that is derived from the input data.
@@ -690,7 +658,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::random_bytes;
     use std::{
-        io::Write,
+        io::{Read, Write},
         sync::{Arc, Mutex},
     };
     use tempfile::NamedTempFile;

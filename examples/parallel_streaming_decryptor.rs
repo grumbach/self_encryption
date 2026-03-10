@@ -2,7 +2,11 @@ use bytes::Bytes;
 use clap::Parser;
 use rayon::prelude::*;
 use self_encryption::{deserialize, streaming_decrypt, DataMap, Error, Result};
-use std::{fs::File, io::{Read, Write}, path::Path};
+use std::{
+    fs::File,
+    io::{Read, Write},
+    path::Path,
+};
 use xor_name::XorName;
 
 /// Parallel streaming decryptor for self-encrypted files
