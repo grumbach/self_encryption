@@ -890,6 +890,7 @@ fn build_chunk_storage(encrypted_chunks: &[EncryptedChunk]) -> HashMap<XorName, 
     storage
 }
 
+#[allow(clippy::type_complexity)]
 fn make_parallel_fetcher(
     storage: &HashMap<XorName, Vec<u8>>,
 ) -> impl Fn(&[(usize, XorName)]) -> Result<Vec<(usize, Bytes)>> + '_ {
