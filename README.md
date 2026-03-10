@@ -85,7 +85,7 @@ fn basic_example() -> Result<()> {
 #### Storage Backends
 
 ```rust
-use self_encryption::{shrink_data_map, get_root_data_map, decrypt_from_storage};
+use self_encryption::{shrink_data_map, get_root_data_map};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

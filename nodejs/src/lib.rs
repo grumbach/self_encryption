@@ -286,28 +286,48 @@ pub fn decrypt_from_storage(
 ) -> Result<()> {
     let output_path = Path::new(&output_file);
 
-    let get_chunk_wrapper = |xor_name: self_encryption::XorName| -> self_encryption::Result<Bytes> {
-        let xor_name = XorName(xor_name);
-        let xor_name = unsafe { XorName::to_napi_value(env.raw(), xor_name) }.unwrap();
-        let xor_name = unsafe { napi::JsUnknown::from_napi_value(env.raw(), xor_name) }.unwrap();
+    // Wrap the single-chunk JS callback into a parallel batch callback for streaming_decrypt
+    let get_chunk_parallel = |hashes: &[(usize, self_encryption::XorName)]| -> self_encryption::Result<Vec<(usize, Bytes)>> {
+        hashes
+            .iter()
+            .map(|(i, hash)| {
+                let xor_name = XorName(*hash);
+                let xor_name_val = unsafe { XorName::to_napi_value(env.raw(), xor_name) }
+                    .map_err(|e| self_encryption::Error::Generic(format!("Failed to convert XorName: {e}")))?;
+                let xor_name_js = unsafe { napi::JsUnknown::from_napi_value(env.raw(), xor_name_val) }
+                    .map_err(|e| self_encryption::Error::Generic(format!("Failed to create JsUnknown: {e}")))?;
 
-        // Call the JavaScript function with the chunk name
-        let result = get_chunk.call(None, &[xor_name]).map_err(|e| {
-            self_encryption::Error::Generic(format!("`getChunk` call resulted in error: {e}\n"))
-        })?;
+                let result = get_chunk.call(None, &[xor_name_js]).map_err(|e| {
+                    self_encryption::Error::Generic(format!("`getChunk` call resulted in error: {e}\n"))
+                })?;
 
-        let data =
-            unsafe { Uint8Array::from_napi_value(env.raw(), result.raw()) }.map_err(|e| {
-                self_encryption::Error::Generic(format!(
-                    "Could not convert getChunk result to Uint8Array: {e}\n"
-                ))
-            })?;
+                let data = unsafe { Uint8Array::from_napi_value(env.raw(), result.raw()) }
+                    .map_err(|e| {
+                        self_encryption::Error::Generic(format!(
+                            "Could not convert getChunk result to Uint8Array: {e}\n"
+                        ))
+                    })?;
 
-        Ok(Bytes::copy_from_slice(data.as_ref()))
+                Ok((*i, Bytes::copy_from_slice(data.as_ref())))
+            })
+            .collect()
     };
 
-    self_encryption::decrypt_from_storage(&data_map.0, output_path, get_chunk_wrapper)
-        .map_err(map_error)
+    let stream = self_encryption::streaming_decrypt(&data_map.0, &get_chunk_parallel)
+        .map_err(map_error)?;
+
+    let mut output = std::fs::File::create(output_path).map_err(|e| {
+        napi::Error::from_reason(format!("Failed to create output file: {e}"))
+    })?;
+
+    for chunk_result in stream {
+        let chunk = chunk_result.map_err(map_error)?;
+        std::io::Write::write_all(&mut output, &chunk).map_err(|e| {
+            napi::Error::from_reason(format!("Failed to write output: {e}"))
+        })?;
+    }
+
+    Ok(())
 }
 
 /// Decrypts data from storage in a streaming fashion using parallel chunk retrieval.
