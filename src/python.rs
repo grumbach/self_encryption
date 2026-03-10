@@ -38,7 +38,7 @@ impl PyXorName {
     #[staticmethod]
     pub fn from_content(content: &[u8]) -> Self {
         Self {
-            inner: XorName::from_content(content),
+            inner: crate::hash::content_hash(content),
         }
     }
 
@@ -252,7 +252,10 @@ impl PyEncryptedChunk {
     /// Returns:
     ///     bytes: The SHA256 hash of the encrypted chunk.
     pub fn hash(&self) -> Cow<'_, [u8]> {
-        XorName::from_content(&self.inner.content).0.to_vec().into()
+        crate::hash::content_hash(&self.inner.content)
+            .0
+            .to_vec()
+            .into()
     }
 }
 

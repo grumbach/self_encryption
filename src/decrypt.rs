@@ -6,7 +6,7 @@
 // KIND, either express or implied. Please review the Licences for the specific language governing
 // permissions and limitations relating to use of the SAFE Network Software.
 
-use crate::{aes, get_pad_key_and_iv, xor, EncryptedChunk, Error, Result};
+use crate::{cipher, utils::get_pad_key_and_nonce, utils::xor, EncryptedChunk, Error, Result};
 use bytes::Bytes;
 use std::io::Cursor;
 use xor_name::XorName;
@@ -30,14 +30,14 @@ pub fn decrypt_sorted_set(
 /// Decrypt a chunk, given the index of that chunk in the sequence of chunks,
 /// and the raw encrypted content.
 pub fn decrypt_chunk(chunk_index: usize, content: &Bytes, src_hashes: &[XorName]) -> Result<Bytes> {
-    let pki = get_pad_key_and_iv(chunk_index, src_hashes);
-    let (pad, key, iv) = pki;
+    let pki = get_pad_key_and_nonce(chunk_index, src_hashes)?;
+    let (pad, key, nonce) = pki;
 
     // First remove the XOR obfuscation
     let xored = xor(content, &pad);
 
     // Then decrypt the content
-    let decrypted = aes::decrypt(xored, &key, &iv)?;
+    let decrypted = cipher::decrypt(xored, &key, &nonce)?;
 
     // Finally decompress
     let mut decompressed = Vec::new();

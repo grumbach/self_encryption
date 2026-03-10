@@ -13,6 +13,7 @@ use crate::{
     Result, STREAM_DECRYPT_BATCH_SIZE,
 };
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::ops::Range;
 use xor_name::XorName;
 
@@ -72,7 +73,17 @@ where
 
         let batch_end =
             (self.current_batch_start + *STREAM_DECRYPT_BATCH_SIZE).min(self.chunk_infos.len());
-        let batch_infos = &self.chunk_infos[self.current_batch_start..batch_end];
+        let batch_infos = self
+            .chunk_infos
+            .get(self.current_batch_start..batch_end)
+            .ok_or_else(|| {
+                crate::Error::Generic(format!(
+                    "batch range {}..{} out of bounds for chunk_infos (len {})",
+                    self.current_batch_start,
+                    batch_end,
+                    self.chunk_infos.len()
+                ))
+            })?;
 
         // Extract chunk hashes for this batch
         let batch_hashes: Vec<_> = batch_infos
@@ -123,7 +134,7 @@ where
     /// # Example
     ///
     /// ```rust
-    /// use self_encryption::{streaming_decrypt, encrypt, test_helpers::random_bytes};
+    /// use self_encryption::{streaming_decrypt, encrypt, test_helpers::random_bytes, hash::content_hash};
     /// use bytes::Bytes;
     /// use xor_name::XorName;
     /// use std::collections::HashMap;
@@ -136,7 +147,7 @@ where
     /// // Create a simple storage backend
     /// let mut storage = HashMap::new();
     /// for chunk in encrypted_chunks {
-    ///     let hash = XorName::from_content(&chunk.content);
+    ///     let hash = content_hash(&chunk.content);
     ///     storage.insert(hash, chunk.content.to_vec());
     /// }
     ///
@@ -195,8 +206,7 @@ where
         let fetched_chunks = (self.get_chunk_parallel)(&required_hashes)?;
 
         // Create a mapping for quick lookup
-        let chunk_map: std::collections::HashMap<usize, Bytes> =
-            fetched_chunks.into_iter().collect();
+        let chunk_map: HashMap<usize, Bytes> = fetched_chunks.into_iter().collect();
 
         // Decrypt the chunks in order and collect the bytes
         let mut all_bytes = Vec::new();
@@ -282,12 +292,13 @@ where
         }
 
         // Return the next chunk from the current batch
-        if self.current_batch_index < self.current_batch_chunks.len() {
-            let chunk = self.current_batch_chunks[self.current_batch_index].clone();
-            self.current_batch_index += 1;
-            Some(Ok(chunk))
-        } else {
-            None
+        match self.current_batch_chunks.get(self.current_batch_index) {
+            Some(chunk) => {
+                let chunk = chunk.clone();
+                self.current_batch_index += 1;
+                Some(Ok(chunk))
+            }
+            None => None,
         }
     }
 }
@@ -300,7 +311,7 @@ where
     ///
     /// # Example
     /// ```rust
-    /// use self_encryption::{streaming_decrypt, encrypt, test_helpers::random_bytes};
+    /// use self_encryption::{streaming_decrypt, encrypt, test_helpers::random_bytes, hash::content_hash};
     /// use bytes::Bytes;
     /// use xor_name::XorName;
     /// use std::collections::HashMap;
@@ -310,7 +321,7 @@ where
     /// let (data_map, encrypted_chunks) = encrypt(original_data)?;
     /// let mut storage = HashMap::new();
     /// for chunk in encrypted_chunks {
-    ///     let hash = XorName::from_content(&chunk.content);
+    ///     let hash = content_hash(&chunk.content);
     ///     storage.insert(hash, chunk.content.to_vec());
     /// }
     /// let get_chunks = |hashes: &[(usize, XorName)]| -> self_encryption::Result<Vec<(usize, Bytes)>> {
@@ -380,7 +391,7 @@ where
 /// ## Sequential Processing
 ///
 /// ```rust
-/// use self_encryption::{streaming_decrypt, encrypt, test_helpers::random_bytes};
+/// use self_encryption::{streaming_decrypt, encrypt, test_helpers::random_bytes, hash::content_hash};
 /// use bytes::Bytes;
 /// use xor_name::XorName;
 /// use std::collections::HashMap;
@@ -393,7 +404,7 @@ where
 /// // Create a simple storage backend
 /// let mut storage = HashMap::new();
 /// for chunk in encrypted_chunks {
-///     let hash = XorName::from_content(&chunk.content);
+///     let hash = content_hash(&chunk.content);
 ///     storage.insert(hash, chunk.content.to_vec());
 /// }
 ///
@@ -430,7 +441,7 @@ where
 /// ## Random Access
 ///
 /// ```rust
-/// use self_encryption::{streaming_decrypt, encrypt, test_helpers::random_bytes};
+/// use self_encryption::{streaming_decrypt, encrypt, test_helpers::random_bytes, hash::content_hash};
 /// use bytes::Bytes;
 /// use xor_name::XorName;
 /// use std::collections::HashMap;
@@ -441,7 +452,7 @@ where
 ///
 /// let mut storage = HashMap::new();
 /// for chunk in encrypted_chunks {
-///     let hash = XorName::from_content(&chunk.content);
+///     let hash = content_hash(&chunk.content);
 ///     storage.insert(hash, chunk.content.to_vec());
 /// }
 ///
@@ -498,7 +509,7 @@ mod tests {
         // Create storage map
         let mut storage = HashMap::new();
         for chunk in encrypted_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = storage.insert(hash, chunk.content.to_vec());
         }
 
@@ -540,7 +551,7 @@ mod tests {
         // Create storage map
         let mut storage = HashMap::new();
         for chunk in encrypted_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = storage.insert(hash, chunk.content.to_vec());
         }
 
@@ -587,7 +598,7 @@ mod tests {
         for (i, chunk) in encrypted_chunks.iter().enumerate() {
             if i < encrypted_chunks.len() - 1 {
                 // Skip the last chunk to simulate missing data
-                let hash = XorName::from_content(&chunk.content);
+                let hash = crate::hash::content_hash(&chunk.content);
                 let _ = storage.insert(hash, chunk.content.to_vec());
             }
         }
@@ -644,7 +655,7 @@ mod tests {
         // Create storage map
         let mut storage = HashMap::new();
         for chunk in encrypted_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = storage.insert(hash, chunk.content.to_vec());
         }
 
@@ -706,7 +717,7 @@ mod tests {
         // Create storage map
         let mut storage = HashMap::new();
         for chunk in encrypted_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = storage.insert(hash, chunk.content.to_vec());
         }
 
@@ -750,7 +761,7 @@ mod tests {
 
         let mut storage = HashMap::new();
         for chunk in encrypted_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = storage.insert(hash, chunk.content.to_vec());
         }
 
@@ -796,7 +807,7 @@ mod tests {
 
         let mut storage = HashMap::new();
         for chunk in encrypted_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = storage.insert(hash, chunk.content.to_vec());
         }
 
@@ -844,7 +855,7 @@ mod tests {
 
         let mut storage = HashMap::new();
         for chunk in encrypted_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = storage.insert(hash, chunk.content.to_vec());
         }
 
@@ -883,7 +894,7 @@ mod tests {
 
         let mut storage = HashMap::new();
         for chunk in encrypted_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = storage.insert(hash, chunk.content.to_vec());
         }
 
@@ -918,7 +929,7 @@ mod tests {
 
         let mut storage = HashMap::new();
         for chunk in encrypted_chunks {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = crate::hash::content_hash(&chunk.content);
             let _ = storage.insert(hash, chunk.content.to_vec());
         }
 
@@ -993,8 +1004,8 @@ mod tests {
             // Create a ChunkInfo with dummy hashes (as the test notes, only src_size and index matter)
             let chunk_info = ChunkInfo {
                 index: chunk_index,
-                dst_hash: XorName::from_content(&[chunk_index as u8]), // Dummy hash
-                src_hash: XorName::from_content(&[(chunk_index + 1) as u8]), // Dummy hash
+                dst_hash: crate::hash::content_hash(&[chunk_index as u8]), // Dummy hash
+                src_hash: crate::hash::content_hash(&[(chunk_index + 1) as u8]), // Dummy hash
                 src_size: chunk_size,
             };
 
@@ -1017,8 +1028,8 @@ mod tests {
 
         // Create a mock DecryptionStream
         let mock_stream = DecryptionStream {
-            chunk_infos: data_map.infos(),
-            src_hashes: vec![XorName::from_content(&[0u8]); num_chunks], // Dummy hashes
+            chunk_infos: data_map.infos().to_vec(),
+            src_hashes: vec![crate::hash::content_hash(&[0u8]); num_chunks], // Dummy hashes
             get_chunk_parallel,
             current_batch_start: 0,
             current_batch_chunks: Vec::new(),

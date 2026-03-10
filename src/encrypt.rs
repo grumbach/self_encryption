@@ -7,7 +7,7 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use crate::{
-    aes::{self, Iv, Key, Pad},
+    cipher::{self, Key, Nonce, Pad},
     error::Error,
     utils::xor,
     Result, COMPRESSION_QUALITY,
@@ -17,8 +17,8 @@ use bytes::Bytes;
 use std::io::Cursor;
 
 /// Encrypt a chunk
-pub(crate) fn encrypt_chunk(content: Bytes, pki: (Pad, Key, Iv)) -> Result<Bytes> {
-    let (pad, key, iv) = pki;
+pub(crate) fn encrypt_chunk(content: Bytes, pki: (Pad, Key, Nonce)) -> Result<Bytes> {
+    let (pad, key, nonce) = pki;
 
     let mut compressed = vec![];
     let enc_params = BrotliEncoderParams {
@@ -31,6 +31,6 @@ pub(crate) fn encrypt_chunk(content: Bytes, pki: (Pad, Key, Iv)) -> Result<Bytes
         &enc_params,
     )
     .map_err(|_| Error::Compression)?;
-    let encrypted = aes::encrypt(Bytes::from(compressed), &key, &iv)?;
+    let encrypted = cipher::encrypt(Bytes::from(compressed), &key, &nonce)?;
     Ok(xor(&encrypted, &pad))
 }

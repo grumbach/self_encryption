@@ -1,4 +1,4 @@
-use crate::aes::{Iv, Key, Pad, IV_SIZE, KEY_SIZE, PAD_SIZE};
+use crate::cipher::{Key, Nonce, Pad, KEY_SIZE, NONCE_SIZE, PAD_SIZE};
 use bytes::Bytes;
 use xor_name::XorName;
 
@@ -16,21 +16,38 @@ pub fn extract_hashes(data_map: &crate::DataMap) -> Vec<XorName> {
     data_map.infos().iter().map(|c| c.src_hash).collect()
 }
 
-pub(crate) fn get_pad_key_and_iv(chunk_index: usize, chunk_hashes: &[XorName]) -> (Pad, Key, Iv) {
-    let (n_1, n_2) = get_n_1_n_2(chunk_index, chunk_hashes.len());
+pub(crate) fn get_pad_key_and_nonce(
+    chunk_index: usize,
+    chunk_hashes: &[XorName],
+) -> crate::Result<(Pad, Key, Nonce)> {
+    let (n_1, n_2) = get_n_1_n_2(chunk_index, chunk_hashes.len())?;
 
-    let src_hash = &chunk_hashes[chunk_index];
-    let n_1_src_hash = &chunk_hashes[n_1];
-    let n_2_src_hash = &chunk_hashes[n_2];
+    let src_hash = chunk_hashes
+        .get(chunk_index)
+        .ok_or_else(|| crate::Error::Generic(format!("chunk_index {chunk_index} out of bounds")))?;
+    let n_1_src_hash = chunk_hashes
+        .get(n_1)
+        .ok_or_else(|| crate::Error::Generic(format!("n_1 index {n_1} out of bounds")))?;
+    let n_2_src_hash = chunk_hashes
+        .get(n_2)
+        .ok_or_else(|| crate::Error::Generic(format!("n_2 index {n_2} out of bounds")))?;
 
-    get_pki(src_hash, n_1_src_hash, n_2_src_hash)
+    Ok(get_pki(src_hash, n_1_src_hash, n_2_src_hash))
 }
 
-pub(crate) fn get_n_1_n_2(chunk_index: usize, total_num_chunks: usize) -> (usize, usize) {
+pub(crate) fn get_n_1_n_2(
+    chunk_index: usize,
+    total_num_chunks: usize,
+) -> crate::Result<(usize, usize)> {
+    if total_num_chunks < 3 {
+        return Err(crate::Error::Generic(format!(
+            "total_num_chunks must be at least 3, got {total_num_chunks}"
+        )));
+    }
     match chunk_index {
-        0 => (total_num_chunks - 1, total_num_chunks - 2),
-        1 => (0, total_num_chunks - 1),
-        n => (n - 1, n - 2),
+        0 => Ok((total_num_chunks - 1, total_num_chunks - 2)),
+        1 => Ok((0, total_num_chunks - 1)),
+        n => Ok((n - 1, n - 2)),
     }
 }
 
@@ -38,23 +55,29 @@ pub(crate) fn get_pki(
     src_hash: &XorName,
     n_1_src_hash: &XorName,
     n_2_src_hash: &XorName,
-) -> (Pad, Key, Iv) {
+) -> (Pad, Key, Nonce) {
     let mut pad = [0u8; PAD_SIZE];
     let mut key = [0u8; KEY_SIZE];
-    let mut iv = [0u8; IV_SIZE];
+    let mut nonce = [0u8; NONCE_SIZE];
 
-    for (pad_iv_el, element) in pad
+    for (pad_el, element) in pad
         .iter_mut()
         .zip(src_hash.iter().chain(n_2_src_hash.iter()))
     {
-        *pad_iv_el = *element;
+        *pad_el = *element;
     }
 
-    for (key_el, element) in key.iter_mut().chain(iv.iter_mut()).zip(n_1_src_hash.iter()) {
+    // Key: full 32 bytes from n_1_src_hash
+    for (key_el, element) in key.iter_mut().zip(n_1_src_hash.iter()) {
         *key_el = *element;
     }
 
-    (Pad(pad), Key(key), Iv(iv))
+    // Nonce: first 12 bytes from n_2_src_hash
+    for (nonce_el, element) in nonce.iter_mut().zip(n_2_src_hash.iter()) {
+        *nonce_el = *element;
+    }
+
+    (Pad(pad), Key(key), Nonce(nonce))
 }
 
 // Returns the number of chunks according to file size.

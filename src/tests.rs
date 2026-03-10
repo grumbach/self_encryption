@@ -102,7 +102,7 @@ fn write_and_read() -> Result<(), Error> {
 
     let chunk_hashes: Vec<_> = encrypted_chunks
         .iter()
-        .map(|chunk| xor_name::XorName::from_content(&chunk.content))
+        .map(|chunk| xor_name::crate::hash::content_hash(&chunk.content))
         .collect();
     dbg!(&chunk_hashes);
 
@@ -195,7 +195,7 @@ fn seek_with_length_over_data_size() -> Result<(), Error> {
         get_root_data_map(data_map.clone(), &mut |hash| {
             encrypted_chunks
                 .iter()
-                .find(|chunk| XorName::from_content(&chunk.content) == hash)
+                .find(|chunk| crate::hash::content_hash(&chunk.content) == hash)
                 .map(|chunk| chunk.content.clone())
                 .ok_or_else(|| Error::Generic(format!("Chunk not found for hash: {:?}", hash)))
         })?
@@ -236,7 +236,7 @@ fn seek_over_chunk_limit() -> Result<(), Error> {
             get_root_data_map(data_map.clone(), &mut |hash| {
                 encrypted_chunks
                     .iter()
-                    .find(|chunk| xor_name::XorName::from_content(&chunk.content) == hash)
+                    .find(|chunk| xor_name::crate::hash::content_hash(&chunk.content) == hash)
                     .map(|chunk| chunk.content.clone())
                     .ok_or_else(|| Error::Generic(format!("Chunk not found for hash: {:?}", hash)))
             })?
@@ -266,7 +266,7 @@ fn test_chunk_tracking() -> Result<(), Error> {
     // Print initial chunk hashes
     println!("\nInitial chunks:");
     for (i, chunk) in initial_chunks.iter().enumerate() {
-        let hash = XorName::from_content(&chunk.content);
+        let hash = crate::hash::content_hash(&chunk.content);
         println!("Chunk {}: hash={:?}", i, hash);
     }
 
@@ -302,7 +302,7 @@ fn test_chunk_tracking() -> Result<(), Error> {
     // Print shrink chunk hashes
     println!("\nShrink chunks:");
     for (i, chunk) in shrink_chunks.iter().enumerate() {
-        let hash = XorName::from_content(&chunk.content);
+        let hash = crate::hash::content_hash(&chunk.content);
         println!("Chunk {}: hash={:?}", i, hash);
     }
 

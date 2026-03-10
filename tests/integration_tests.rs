@@ -2,8 +2,8 @@ use bytes::Bytes;
 use rayon::prelude::*;
 use self_encryption::{
     decrypt, decrypt_from_storage, encrypt, encrypt_from_file, get_root_data_map, shrink_data_map,
-    streaming_decrypt_from_storage, test_helpers::random_bytes, verify_chunk, DataMap,
-    EncryptedChunk, Error, Result,
+    stream_encrypt, streaming_decrypt, streaming_decrypt_from_storage, streaming_encrypt_from_file,
+    test_helpers::random_bytes, verify_chunk, DataMap, EncryptedChunk, Error, Result,
 };
 use std::{
     collections::HashMap,
@@ -11,7 +11,7 @@ use std::{
     io::{Read, Write},
     sync::{Arc, Mutex},
 };
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 use xor_name::XorName;
 
 // Define traits for our storage operations
@@ -500,7 +500,7 @@ fn test_comprehensive_encryption_decryption() -> Result<()> {
         println!("\nA.2 Testing decrypt_from_storage() with encrypt() result:");
         // First store chunks to disk
         for chunk in &chunks1 {
-            let hash = XorName::from_content(&chunk.content);
+            let hash = self_encryption::hash::content_hash(&chunk.content);
             let chunk_path = storage.disk_dir.path().join(hex::encode(hash));
             File::create(&chunk_path)?.write_all(&chunk.content)?;
         }
@@ -713,7 +713,7 @@ fn test_streaming_decrypt_from_storage_with_parallel_random_chunks() -> Result<(
     // Create a storage map from encrypted_chunks using their hashes as keys
     let mut chunk_storage = HashMap::new();
     for chunk in encrypted_chunks.iter() {
-        let hash = XorName::from_content(&chunk.content);
+        let hash = self_encryption::hash::content_hash(&chunk.content);
         chunk_storage.insert(hash, chunk.content.clone());
     }
 
@@ -765,8 +765,8 @@ fn test_streaming_decrypt_from_storage_with_parallel_random_chunks() -> Result<(
     );
 
     // Compare hash first using XorName (which provides content hashing)
-    let original_hash = XorName::from_content(&original_data);
-    let decrypted_hash = XorName::from_content(&decrypted_data);
+    let original_hash = self_encryption::hash::content_hash(&original_data);
+    let decrypted_hash = self_encryption::hash::content_hash(&decrypted_data);
 
     if original_hash != decrypted_hash {
         println!("Hash mismatch detected!");
@@ -824,7 +824,10 @@ fn test_chunk_verification() -> Result<()> {
     let (data_map, _) = encrypt_from_file(&input_path, storage.disk_dir.path())?;
 
     // Get the first chunk info and content
-    let first_chunk_info = &data_map.infos()[0];
+    let first_chunk_info = data_map
+        .infos()
+        .first()
+        .ok_or_else(|| crate::Error::Generic("No chunk info available".to_string()))?;
     let chunk_path = storage
         .disk_dir
         .path()
@@ -869,6 +872,579 @@ fn test_chunk_verification() -> Result<()> {
             Ok(_) => println!("✓ Chunk {i} verified successfully"),
             Err(e) => println!("✗ Chunk {i} verification failed: {e}"),
         }
+    }
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════
+// E2E tests for quantum-safe crypto upgrade verification
+// ═══════════════════════════════════════════════════════════════
+
+fn build_chunk_storage(encrypted_chunks: &[EncryptedChunk]) -> HashMap<XorName, Vec<u8>> {
+    let mut storage = HashMap::new();
+    for chunk in encrypted_chunks {
+        let hash = self_encryption::hash::content_hash(&chunk.content);
+        let _ = storage.insert(hash, chunk.content.to_vec());
+    }
+    storage
+}
+
+fn make_parallel_fetcher(
+    storage: &HashMap<XorName, Vec<u8>>,
+) -> impl Fn(&[(usize, XorName)]) -> Result<Vec<(usize, Bytes)>> + '_ {
+    move |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
+        let mut results = Vec::new();
+        for &(index, hash) in hashes {
+            let data = storage
+                .get(&hash)
+                .ok_or_else(|| Error::Generic(format!("Chunk not found: {}", hex::encode(hash))))?;
+            results.push((index, Bytes::from(data.clone())));
+        }
+        Ok(results)
+    }
+}
+
+// --- Task 5: stream_encrypt + streaming_decrypt roundtrip ---
+
+#[test]
+fn test_stream_encrypt_decrypt_roundtrip() -> Result<()> {
+    let data_size = 100_000;
+    let original_data = random_bytes(data_size);
+
+    let mut stream = stream_encrypt(
+        data_size,
+        original_data.chunks(4096).map(|c| Bytes::from(c.to_vec())),
+    )?;
+
+    let mut storage = HashMap::new();
+    for chunk_result in stream.chunks() {
+        let (hash, content) = chunk_result?;
+        let _ = storage.insert(hash, content.to_vec());
+    }
+
+    let data_map = stream
+        .datamap()
+        .ok_or_else(|| Error::Generic("No DataMap after stream_encrypt".to_string()))?;
+
+    let fetcher = make_parallel_fetcher(&storage);
+    let decrypt_stream = streaming_decrypt(data_map, fetcher)?;
+    let decrypted = decrypt_stream.range_full()?;
+
+    assert_eq!(decrypted.as_ref(), &original_data[..]);
+    Ok(())
+}
+
+// --- Task 6: streaming_encrypt_from_file + streaming_decrypt_from_storage roundtrip ---
+
+#[test]
+fn test_file_stream_encrypt_decrypt_roundtrip() -> Result<()> {
+    let data_size = 200_000;
+    let original_data = random_bytes(data_size);
+
+    let mut temp_input = NamedTempFile::new()?;
+    temp_input.write_all(&original_data)?;
+
+    let storage = Arc::new(Mutex::new(HashMap::new()));
+    let storage_clone = storage.clone();
+
+    let store = move |hash: XorName, content: Bytes| -> Result<()> {
+        storage_clone
+            .lock()
+            .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
+            .insert(hash, content.to_vec());
+        Ok(())
+    };
+
+    let data_map = streaming_encrypt_from_file(temp_input.path(), store)?;
+
+    let temp_output = NamedTempFile::new()?;
+    let stored = storage
+        .lock()
+        .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
+        .clone();
+
+    let fetcher = |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
+        let mut results = Vec::new();
+        for &(index, hash) in hashes {
+            let data = stored
+                .get(&hash)
+                .ok_or_else(|| Error::Generic(format!("Chunk not found: {}", hex::encode(hash))))?;
+            results.push((index, Bytes::from(data.clone())));
+        }
+        Ok(results)
+    };
+
+    streaming_decrypt_from_storage(&data_map, temp_output.path(), fetcher)?;
+
+    let mut decrypted = Vec::new();
+    File::open(temp_output.path())?.read_to_end(&mut decrypted)?;
+
+    assert_eq!(decrypted, original_data.to_vec());
+    Ok(())
+}
+
+// --- Task 7: Cross-compatibility between streaming APIs ---
+
+#[test]
+fn test_stream_encrypt_file_decrypt_storage_cross() -> Result<()> {
+    let data_size = 150_000;
+    let original_data = random_bytes(data_size);
+
+    let mut stream = stream_encrypt(
+        data_size,
+        original_data.chunks(8192).map(|c| Bytes::from(c.to_vec())),
+    )?;
+
+    let mut storage = HashMap::new();
+    for chunk_result in stream.chunks() {
+        let (hash, content) = chunk_result?;
+        let _ = storage.insert(hash, content.to_vec());
+    }
+
+    let data_map = stream
+        .datamap()
+        .ok_or_else(|| Error::Generic("No DataMap".to_string()))?
+        .clone();
+
+    let temp_output = NamedTempFile::new()?;
+    let fetcher = |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
+        let mut results = Vec::new();
+        for &(index, hash) in hashes {
+            let data = storage
+                .get(&hash)
+                .ok_or_else(|| Error::Generic(format!("Chunk not found: {}", hex::encode(hash))))?;
+            results.push((index, Bytes::from(data.clone())));
+        }
+        Ok(results)
+    };
+
+    streaming_decrypt_from_storage(&data_map, temp_output.path(), fetcher)?;
+
+    let mut decrypted = Vec::new();
+    File::open(temp_output.path())?.read_to_end(&mut decrypted)?;
+
+    assert_eq!(decrypted, original_data.to_vec());
+    Ok(())
+}
+
+#[test]
+fn test_file_encrypt_stream_decrypt_cross() -> Result<()> {
+    let data_size = 150_000;
+    let original_data = random_bytes(data_size);
+
+    let mut temp_input = NamedTempFile::new()?;
+    temp_input.write_all(&original_data)?;
+
+    let storage = Arc::new(Mutex::new(HashMap::new()));
+    let storage_clone = storage.clone();
+
+    let store = move |hash: XorName, content: Bytes| -> Result<()> {
+        storage_clone
+            .lock()
+            .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
+            .insert(hash, content.to_vec());
+        Ok(())
+    };
+
+    let data_map = streaming_encrypt_from_file(temp_input.path(), store)?;
+
+    let stored = storage
+        .lock()
+        .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
+        .clone();
+
+    let fetcher = make_parallel_fetcher(&stored);
+    let decrypt_stream = streaming_decrypt(&data_map, fetcher)?;
+    let decrypted = decrypt_stream.range_full()?;
+
+    assert_eq!(decrypted.as_ref(), &original_data[..]);
+    Ok(())
+}
+
+// --- Task 8: In-memory encrypt ↔ streaming decrypt cross-compatibility ---
+
+#[test]
+fn test_memory_encrypt_stream_decrypt() -> Result<()> {
+    let data_size = 100_000;
+    let original_data = random_bytes(data_size);
+
+    let (data_map, encrypted_chunks) = encrypt(original_data.clone())?;
+    let storage = build_chunk_storage(&encrypted_chunks);
+    let fetcher = make_parallel_fetcher(&storage);
+
+    let decrypt_stream = streaming_decrypt(&data_map, fetcher)?;
+    let decrypted = decrypt_stream.range_full()?;
+
+    assert_eq!(decrypted.as_ref(), &original_data[..]);
+    Ok(())
+}
+
+#[test]
+fn test_stream_encrypt_memory_decrypt() -> Result<()> {
+    let data_size = 100_000;
+    let original_data = random_bytes(data_size);
+
+    let mut stream = stream_encrypt(
+        data_size,
+        original_data.chunks(4096).map(|c| Bytes::from(c.to_vec())),
+    )?;
+
+    let mut chunks = Vec::new();
+    for chunk_result in stream.chunks() {
+        let (_hash, content) = chunk_result?;
+        chunks.push(EncryptedChunk { content });
+    }
+
+    let data_map = stream
+        .datamap()
+        .ok_or_else(|| Error::Generic("No DataMap".to_string()))?;
+
+    let decrypted = decrypt(data_map, &chunks)?;
+    assert_eq!(decrypted.as_ref(), &original_data[..]);
+    Ok(())
+}
+
+// --- Task 9: DecryptionStream random access ---
+
+#[test]
+fn test_streaming_decrypt_range_access() -> Result<()> {
+    let data_size = 50_000;
+    let original_data = random_bytes(data_size);
+
+    let (data_map, encrypted_chunks) = encrypt(original_data.clone())?;
+    let storage = build_chunk_storage(&encrypted_chunks);
+    let fetcher = make_parallel_fetcher(&storage);
+
+    let stream = streaming_decrypt(&data_map, fetcher)?;
+
+    // get_range
+    let range = stream.get_range(1000, 2000)?;
+    assert_eq!(range.as_ref(), &original_data[1000..3000]);
+
+    // range
+    let range = stream.range(500..1500)?;
+    assert_eq!(range.as_ref(), &original_data[500..1500]);
+
+    // range_full
+    let full = stream.range_full()?;
+    assert_eq!(full.as_ref(), &original_data[..]);
+
+    // range_from
+    let from = stream.range_from(40_000)?;
+    assert_eq!(from.as_ref(), &original_data[40_000..]);
+
+    // range_to
+    let to = stream.range_to(5000)?;
+    assert_eq!(to.as_ref(), &original_data[..5000]);
+
+    // range_inclusive
+    let inclusive = stream.range_inclusive(100, 199)?;
+    assert_eq!(inclusive.as_ref(), &original_data[100..200]);
+
+    // file_size
+    assert_eq!(stream.file_size(), data_size);
+
+    Ok(())
+}
+
+// --- Task 10: Large file streaming roundtrip ---
+
+#[test]
+fn test_large_file_streaming_roundtrip() -> Result<()> {
+    let data_size = 20 * 1024 * 1024; // 20MB
+    let original_data = random_bytes(data_size);
+
+    let mut temp_input = NamedTempFile::new()?;
+    temp_input.write_all(&original_data)?;
+
+    let storage = Arc::new(Mutex::new(HashMap::new()));
+    let storage_clone = storage.clone();
+
+    let store = move |hash: XorName, content: Bytes| -> Result<()> {
+        storage_clone
+            .lock()
+            .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
+            .insert(hash, content.to_vec());
+        Ok(())
+    };
+
+    let data_map = streaming_encrypt_from_file(temp_input.path(), store)?;
+
+    let temp_output = NamedTempFile::new()?;
+    let stored = storage
+        .lock()
+        .map_err(|_| Error::Generic("Lock poisoned".to_string()))?
+        .clone();
+
+    let fetcher = |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
+        let mut results = Vec::new();
+        for &(index, hash) in hashes {
+            let data = stored
+                .get(&hash)
+                .ok_or_else(|| Error::Generic(format!("Chunk not found: {}", hex::encode(hash))))?;
+            results.push((index, Bytes::from(data.clone())));
+        }
+        Ok(results)
+    };
+
+    streaming_decrypt_from_storage(&data_map, temp_output.path(), fetcher)?;
+
+    let mut decrypted = Vec::new();
+    File::open(temp_output.path())?.read_to_end(&mut decrypted)?;
+
+    assert_eq!(decrypted.len(), data_size);
+    assert_eq!(decrypted, original_data.to_vec());
+    Ok(())
+}
+
+// --- Task 11: Edge cases ---
+
+#[test]
+fn test_minimum_size_data() -> Result<()> {
+    let data_size = self_encryption::MIN_ENCRYPTABLE_BYTES;
+    let original_data = random_bytes(data_size);
+
+    let (data_map, chunks) = encrypt(original_data.clone())?;
+    let decrypted = decrypt(&data_map, &chunks)?;
+    assert_eq!(decrypted.as_ref(), &original_data[..]);
+    Ok(())
+}
+
+#[test]
+fn test_single_chunk_boundary() -> Result<()> {
+    let data_size = self_encryption::MAX_CHUNK_SIZE;
+    let original_data = random_bytes(data_size);
+
+    let (data_map, chunks) = encrypt(original_data.clone())?;
+    let decrypted = decrypt(&data_map, &chunks)?;
+    assert_eq!(decrypted.as_ref(), &original_data[..]);
+    Ok(())
+}
+
+#[test]
+fn test_multi_chunk_boundary() -> Result<()> {
+    let data_size = 3 * self_encryption::MAX_CHUNK_SIZE;
+    let original_data = random_bytes(data_size);
+
+    let (data_map, chunks) = encrypt(original_data.clone())?;
+    let decrypted = decrypt(&data_map, &chunks)?;
+    assert_eq!(decrypted.as_ref(), &original_data[..]);
+    Ok(())
+}
+
+#[test]
+fn test_non_aligned_sizes() -> Result<()> {
+    for data_size in [
+        self_encryption::MAX_CHUNK_SIZE + 1,
+        self_encryption::MAX_CHUNK_SIZE * 2 + 7,
+        self_encryption::MIN_ENCRYPTABLE_BYTES + 1,
+        99_999,
+    ] {
+        let original_data = random_bytes(data_size);
+        let (data_map, chunks) = encrypt(original_data.clone())?;
+        let decrypted = decrypt(&data_map, &chunks)?;
+        assert_eq!(
+            decrypted.as_ref(),
+            &original_data[..],
+            "Failed for data_size={data_size}"
+        );
+    }
+    Ok(())
+}
+
+// --- Task 12-16: Security verification tests ---
+
+#[test]
+fn test_encrypted_chunks_do_not_contain_plaintext() -> Result<()> {
+    let pattern = b"HELLO_WORLD_PATTERN_12345";
+    let mut data = Vec::new();
+    while data.len() < 100_000 {
+        data.extend_from_slice(pattern);
+    }
+    let original_data = Bytes::from(data);
+
+    let (_, encrypted_chunks) = encrypt(original_data)?;
+
+    for (i, chunk) in encrypted_chunks.iter().enumerate() {
+        for window in chunk.content.windows(pattern.len()) {
+            assert_ne!(
+                window, pattern,
+                "Chunk {i} contains plaintext pattern — encryption is broken!"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_tampered_chunk_fails_decryption() -> Result<()> {
+    let original_data = random_bytes(10_000);
+    let (data_map, mut encrypted_chunks) = encrypt(original_data)?;
+
+    // Tamper with the first chunk — flip a bit in the middle
+    if let Some(first_chunk) = encrypted_chunks.first_mut() {
+        let mut tampered = first_chunk.content.to_vec();
+        let mid = tampered.len() / 2;
+        if let Some(byte) = tampered.get_mut(mid) {
+            *byte ^= 0xFF;
+        }
+        first_chunk.content = Bytes::from(tampered);
+    }
+
+    // Decryption should fail due to AEAD tag verification
+    let result = decrypt(&data_map, &encrypted_chunks);
+    assert!(
+        result.is_err(),
+        "Decryption should fail with tampered chunk (AEAD integrity check)"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_wrong_datamap_fails_decryption() -> Result<()> {
+    let data_a = random_bytes(10_000);
+    let data_b = random_bytes(10_000);
+
+    let (data_map_a, _chunks_a) = encrypt(data_a)?;
+    let (_data_map_b, chunks_b) = encrypt(data_b)?;
+
+    // Try to decrypt chunks_b with data_map_a
+    let result = decrypt(&data_map_a, &chunks_b);
+    assert!(
+        result.is_err(),
+        "Decryption should fail when using wrong DataMap"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_aead_tag_protects_integrity() -> Result<()> {
+    use self_encryption::hash::content_hash;
+
+    let plaintext = Bytes::from(vec![42u8; 1000]);
+
+    // Create keys for encryption
+    let key_hash = content_hash(b"test_key_data");
+    let nonce_hash = content_hash(b"test_nonce_data");
+
+    // Build cipher key and nonce
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(&key_hash.0);
+
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes.copy_from_slice(&nonce_hash.0[..12]);
+
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
+    let key = Key::from_slice(&key_bytes);
+    let cipher = ChaCha20Poly1305::new(key);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_ref())
+        .map_err(|_| Error::Generic("Encryption failed".to_string()))?;
+
+    // Verify ciphertext is 16 bytes longer than plaintext (Poly1305 tag)
+    assert_eq!(
+        ciphertext.len(),
+        plaintext.len() + 16,
+        "AEAD ciphertext should be plaintext + 16 bytes (auth tag)"
+    );
+
+    // Verify normal decryption works
+    let decrypted = cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .map_err(|_| Error::Generic("Decryption failed".to_string()))?;
+    assert_eq!(decrypted, plaintext.as_ref());
+
+    // Flip a bit in ciphertext body → should fail
+    let mut tampered_body = ciphertext.clone();
+    if let Some(byte) = tampered_body.get_mut(0) {
+        *byte ^= 1;
+    }
+    assert!(
+        cipher.decrypt(nonce, tampered_body.as_ref()).is_err(),
+        "Flipping ciphertext bit should fail AEAD verification"
+    );
+
+    // Flip a bit in auth tag (last 16 bytes) → should fail
+    let mut tampered_tag = ciphertext.clone();
+    let tag_idx = tampered_tag.len() - 1;
+    if let Some(byte) = tampered_tag.get_mut(tag_idx) {
+        *byte ^= 1;
+    }
+    assert!(
+        cipher.decrypt(nonce, tampered_tag.as_ref()).is_err(),
+        "Flipping auth tag bit should fail AEAD verification"
+    );
+
+    Ok(())
+}
+
+// --- Task 17: Verify BLAKE3 is used for hashing ---
+
+#[test]
+fn test_content_hash_is_blake3() -> Result<()> {
+    let test_data = b"known content for blake3 verification";
+    let expected_hash = blake3::hash(test_data);
+    let actual_hash = self_encryption::hash::content_hash(test_data);
+    assert_eq!(
+        actual_hash.0,
+        *expected_hash.as_bytes(),
+        "content_hash should produce BLAKE3 output"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_encrypted_chunk_dst_hash_is_blake3() -> Result<()> {
+    let original_data = random_bytes(10_000);
+    let (data_map, encrypted_chunks) = encrypt(original_data)?;
+
+    for (info, chunk) in data_map.infos().iter().zip(encrypted_chunks.iter()) {
+        let computed_hash = self_encryption::hash::content_hash(&chunk.content);
+        assert_eq!(
+            computed_hash, info.dst_hash,
+            "dst_hash in DataMap should match BLAKE3 hash of encrypted content"
+        );
+    }
+    Ok(())
+}
+
+// --- Task 18: Verify key derivation sizes ---
+
+#[test]
+fn test_key_derivation_sizes() -> Result<()> {
+    // Key derivation internals are tested indirectly through encrypt/decrypt roundtrips,
+    // but we can verify the constant sizes are correct for ChaCha20-Poly1305.
+    use self_encryption::hash::content_hash;
+
+    let h1 = content_hash(b"hash1");
+    let h2 = content_hash(b"hash2");
+    let h3 = content_hash(b"hash3");
+    let hashes = vec![h1, h2, h3];
+
+    // XorName is 32 bytes
+    assert_eq!(std::mem::size_of::<XorName>(), 32);
+
+    // Encrypt and decrypt a minimal file to verify the key derivation works end-to-end
+    let data = random_bytes(self_encryption::MIN_ENCRYPTABLE_BYTES);
+    let (data_map, chunks) = encrypt(data.clone())?;
+    let decrypted = decrypt(&data_map, &chunks)?;
+    assert_eq!(decrypted.as_ref(), &data[..]);
+
+    // Verify the data map has 3 chunks with valid hashes
+    assert_eq!(data_map.len(), 3);
+    for info in data_map.infos() {
+        assert_ne!(info.src_hash, XorName::default());
+        assert_ne!(info.dst_hash, XorName::default());
+    }
+
+    // Verify hashes are 32 bytes (BLAKE3 output = XorName size)
+    for hash in &hashes {
+        assert_eq!(hash.0.len(), 32);
     }
 
     Ok(())
