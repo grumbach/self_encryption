@@ -1,6 +1,5 @@
 use crate::{
-    decrypt_from_storage as rust_decrypt_from_storage, encrypt_from_file as rust_encrypt_from_file,
-    ChunkInfo, DataMap, EncryptedChunk, XorName,
+    decrypt_from_storage as rust_decrypt_from_storage, ChunkInfo, DataMap, EncryptedChunk, XorName,
 };
 use bytes::Bytes;
 use pyo3::prelude::*;
@@ -332,12 +331,56 @@ pub fn decrypt(
 ///     ValueError: If the input parameters are invalid.
 #[pyfunction]
 pub fn encrypt_from_file(input_file: &str, output_dir: &str) -> PyResult<(PyDataMap, Vec<String>)> {
+    use std::io::{Read, Write};
+
     let input_path = Path::new(input_file);
     let output_path = Path::new(output_dir);
-    let (data_map, chunk_names) = rust_encrypt_from_file(input_path, output_path).map_err(|e| {
-        pyo3::exceptions::PyOSError::new_err(format!("Failed to encrypt file: {e}"))
+
+    let file = std::fs::File::open(input_path).map_err(|e| {
+        pyo3::exceptions::PyOSError::new_err(format!("Failed to open input file: {e}"))
     })?;
-    let chunk_names = chunk_names.iter().map(|name| hex::encode(name.0)).collect();
+    let data_size = file
+        .metadata()
+        .map_err(|e| {
+            pyo3::exceptions::PyOSError::new_err(format!("Failed to get file metadata: {e}"))
+        })?
+        .len() as usize;
+    let mut reader = std::io::BufReader::new(file);
+
+    let data_iter = std::iter::from_fn(move || {
+        let mut buffer = vec![0u8; 8192];
+        match reader.read(&mut buffer) {
+            Ok(0) => None,
+            Ok(n) => {
+                buffer.truncate(n);
+                Some(Bytes::from(buffer))
+            }
+            Err(_) => None,
+        }
+    });
+
+    let mut stream = crate::stream_encrypt(data_size, data_iter)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Encryption failed: {e}")))?;
+
+    let mut chunk_names = Vec::new();
+    for chunk_result in stream.chunks() {
+        let (hash, content) = chunk_result
+            .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Encryption error: {e}")))?;
+        chunk_names.push(hex::encode(hash.0));
+
+        let chunk_path = output_path.join(hex::encode(hash));
+        let mut output_file = std::fs::File::create(&chunk_path).map_err(|e| {
+            pyo3::exceptions::PyOSError::new_err(format!("Failed to create chunk file: {e}"))
+        })?;
+        output_file.write_all(&content).map_err(|e| {
+            pyo3::exceptions::PyOSError::new_err(format!("Failed to write chunk: {e}"))
+        })?;
+    }
+
+    let data_map = stream.into_datamap().ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("Encryption did not produce a DataMap")
+    })?;
+
     Ok((PyDataMap { inner: data_map }, chunk_names))
 }
 
@@ -443,11 +486,13 @@ pub fn streaming_decrypt_from_storage(
     };
 
     // Use streaming_decrypt internally, writing output to file
-    let stream = crate::streaming_decrypt(&data_map.inner, get_chunks_wrapper)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Streaming decryption failed: {e}")))?;
+    let stream = crate::streaming_decrypt(&data_map.inner, get_chunks_wrapper).map_err(|e| {
+        pyo3::exceptions::PyOSError::new_err(format!("Streaming decryption failed: {e}"))
+    })?;
 
-    let mut file = std::fs::File::create(output_path)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Failed to create output file: {e}")))?;
+    let mut file = std::fs::File::create(output_path).map_err(|e| {
+        pyo3::exceptions::PyOSError::new_err(format!("Failed to create output file: {e}"))
+    })?;
 
     for chunk_result in stream {
         let chunk = chunk_result

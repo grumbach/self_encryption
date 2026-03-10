@@ -9,9 +9,7 @@
 //! Tests for streaming encryption functionality.
 
 use bytes::Bytes;
-use self_encryption::{
-    stream_encrypt, test_helpers::random_bytes, DataMap, Error, Result,
-};
+use self_encryption::{stream_encrypt, test_helpers::random_bytes, DataMap, Error, Result};
 use std::collections::HashMap;
 use xor_name::XorName;
 
@@ -131,8 +129,14 @@ fn test_encryption_consistency(file_size: usize) -> Result<()> {
     let std_decrypted = self_encryption::decrypt(&std_datamap, &std_encrypted)?;
     let stream_decrypted = self_encryption::decrypt(&stream_datamap, &stream_encrypted)?;
 
-    assert_eq!(std_decrypted, test_data, "Standard encrypt decryption mismatch");
-    assert_eq!(stream_decrypted, test_data, "Stream encrypt decryption mismatch");
+    assert_eq!(
+        std_decrypted, test_data,
+        "Standard encrypt decryption mismatch"
+    );
+    assert_eq!(
+        stream_decrypted, test_data,
+        "Stream encrypt decryption mismatch"
+    );
 
     println!("✅ Encryption consistency verified for {file_size} bytes");
     Ok(())
