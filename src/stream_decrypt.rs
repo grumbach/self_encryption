@@ -1046,15 +1046,15 @@ mod tests {
                 let diff = start_position - start_chunk_pos;
                 println!("Difference: {}", diff);
 
-                // The difference should be less than MAX_CHUNK_SIZE
+                // The difference should be less than the max_chunk_size used for chunking
                 assert!(
-                    diff <= crate::MAX_CHUNK_SIZE,
+                    diff <= max_chunk_size,
                     "Difference {} should be less than {}, but got {}",
                     diff,
-                    crate::MAX_CHUNK_SIZE,
+                    max_chunk_size,
                     diff
                 );
-                println!("✓ Difference {} is less than MAX_CHUNK_SIZE", diff);
+                println!("✓ Difference {} is less than max_chunk_size", diff);
             } else {
                 println!("start_chunk_pos exactly equals start_position");
             }
