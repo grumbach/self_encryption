@@ -51,6 +51,11 @@ pub(crate) fn get_n_1_n_2(
             "total_num_chunks must be at least 3, got {total_num_chunks}"
         )));
     }
+    if chunk_index >= total_num_chunks {
+        return Err(crate::Error::Generic(format!(
+            "chunk_index {chunk_index} out of bounds for total_num_chunks {total_num_chunks}"
+        )));
+    }
     match chunk_index {
         0 => Ok((total_num_chunks - 1, total_num_chunks - 2)),
         1 => Ok((0, total_num_chunks - 1)),
@@ -335,6 +340,16 @@ mod tests {
             "expected at least 15/52 pad bytes to differ, got {}",
             pad_diff
         );
+    }
+
+    #[test]
+    fn test_get_n_1_n_2_out_of_bounds() {
+        let result = get_n_1_n_2(5, 3);
+        assert!(result.is_err(), "chunk_index >= total should fail");
+        let result = get_n_1_n_2(3, 3);
+        assert!(result.is_err(), "chunk_index == total should fail");
+        let result = get_n_1_n_2(2, 3);
+        assert!(result.is_ok(), "chunk_index < total should succeed");
     }
 
     #[test]

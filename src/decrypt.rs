@@ -8,6 +8,7 @@
 
 use crate::{cipher, utils::get_pad_key_and_nonce, utils::xor, EncryptedChunk, Error, Result};
 use bytes::Bytes;
+use rayon::prelude::*;
 use std::io::Cursor;
 use xor_name::XorName;
 
@@ -17,12 +18,19 @@ pub fn decrypt_sorted_set(
     encrypted_chunks: &[&EncryptedChunk],
     child_level: usize,
 ) -> Result<Bytes> {
-    let mut all_bytes = Vec::new();
+    // Decrypt chunks in parallel, then concatenate in order
+    let decrypted_chunks: Vec<Bytes> = encrypted_chunks
+        .par_iter()
+        .enumerate()
+        .map(|(chunk_index, chunk)| {
+            decrypt_chunk(chunk_index, &chunk.content, &src_hashes, child_level)
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    // Process chunks sequentially to maintain proper boundaries
-    for (chunk_index, chunk) in encrypted_chunks.iter().enumerate() {
-        let decrypted = decrypt_chunk(chunk_index, &chunk.content, &src_hashes, child_level)?;
-        all_bytes.extend_from_slice(&decrypted);
+    let total_len = decrypted_chunks.iter().map(|c| c.len()).sum();
+    let mut all_bytes = Vec::with_capacity(total_len);
+    for chunk in &decrypted_chunks {
+        all_bytes.extend_from_slice(chunk);
     }
 
     Ok(Bytes::from(all_bytes))
