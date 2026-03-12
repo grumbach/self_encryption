@@ -134,14 +134,14 @@ pub static STREAM_DECRYPT_BATCH_SIZE: LazyLock<usize> = LazyLock::new(|| {
 /// The minimum size (before compression) of data to be self-encrypted, defined as 3B.
 pub const MIN_ENCRYPTABLE_BYTES: usize = 3 * MIN_CHUNK_SIZE;
 
-/// The maximum size (before compression) of an individual chunk of a file, defaulting as 1MiB.
+/// The maximum size (before compression) of an individual chunk of a file, defaulting to ~4MiB.
+/// Set to 4190208 (4MiB - 4KiB) to leave headroom for occasional compression growth.
 pub const MAX_CHUNK_SIZE: usize = match std::option_env!("MAX_CHUNK_SIZE") {
     Some(v) => match usize::from_str_radix(v, 10) {
         Ok(v) => v,
         Err(_err) => panic!("`MAX_CHUNK_SIZE` failed to parse as usize"),
     },
-    // Default to 4MiB
-    None => 4 * 1024 * 1024,
+    None => 4_190_208,
 };
 
 /// The minimum size (before compression) of an individual chunk of a file, defined as 1B.
