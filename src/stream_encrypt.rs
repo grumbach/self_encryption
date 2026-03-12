@@ -312,8 +312,8 @@ where
             }
         }
 
-        // Encrypt the chunk
-        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes)?;
+        // Encrypt the chunk (initial encryption is always child_level 0)
+        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes, 0)?;
         let encrypted_content = encrypt_chunk(chunk_data, pki)?;
         let dst_hash = crate::hash::content_hash(&encrypted_content);
 
@@ -356,7 +356,7 @@ where
                 .and_then(|entry| entry.take());
             if let Some(chunk_data) = chunk_data {
                 // For deferred chunks, we need to encrypt them with full source hashes
-                let pki = get_pad_key_and_nonce(chunk_index, &src_hashes)?;
+                let pki = get_pad_key_and_nonce(chunk_index, &src_hashes, 0)?;
                 let encrypted_content = encrypt_chunk(chunk_data, pki)?;
                 let dst_hash = crate::hash::content_hash(&encrypted_content);
 
