@@ -186,7 +186,7 @@ pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
         }
 
         // For chunks 2 onwards, we can encrypt immediately since we have the previous two hashes
-        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes)?;
+        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes, 0)?;
         let encrypted_content = encrypt::encrypt_chunk(chunk_data, pki)?;
         let dst_hash = hash::content_hash(&encrypted_content);
 
@@ -204,7 +204,7 @@ pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
 
     // Now process the first two chunks using the complete set of source hashes
     for (chunk_index, chunk_data, src_hash, src_size) in first_chunks {
-        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes)?;
+        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes, 0)?;
         let encrypted_content = encrypt::encrypt_chunk(chunk_data, pki)?;
         let dst_hash = hash::content_hash(&encrypted_content);
 
@@ -252,6 +252,8 @@ pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
 /// * `Result<Bytes>` - The decrypted data or an error if chunks are missing/corrupted
 pub(crate) fn decrypt_full_set(data_map: &DataMap, chunks: &[EncryptedChunk]) -> Result<Bytes> {
     let src_hashes = extract_hashes(data_map);
+    // encrypt() always uses child_level=0 for key derivation, so decrypt must match
+    let child_level = 0;
 
     // Create a mapping of chunk hashes to chunks for efficient lookup
     let chunk_map: HashMap<XorName, &EncryptedChunk> = chunks
@@ -271,7 +273,7 @@ pub(crate) fn decrypt_full_set(data_map: &DataMap, chunks: &[EncryptedChunk]) ->
         sorted_chunks.push(*chunk);
     }
 
-    decrypt::decrypt_sorted_set(src_hashes, &sorted_chunks)
+    decrypt::decrypt_sorted_set(src_hashes, &sorted_chunks, child_level)
 }
 
 /// Decrypts a range of data from the encrypted chunks.
@@ -325,7 +327,8 @@ pub(crate) fn decrypt_range(
     let mut all_bytes = Vec::new();
     for (idx, chunk) in sorted_chunks.iter().enumerate() {
         let chunk_idx = start_chunk + idx;
-        let decrypted = decrypt_chunk(chunk_idx, &chunk.content, &src_hashes)?;
+        // encrypt() always uses child_level=0 for key derivation, so decrypt must match
+        let decrypted = decrypt_chunk(chunk_idx, &chunk.content, &src_hashes, 0)?;
         all_bytes.extend_from_slice(&decrypted);
     }
 
@@ -751,20 +754,19 @@ mod tests {
 
         // Create chunk retrieval function for streaming_decrypt
         let stored_clone = stored.clone();
-        let get_chunk_parallel =
-            |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
-                hashes
-                    .iter()
-                    .map(|(i, hash)| {
-                        stored_clone
-                            .get(hash)
-                            .map(|data| (*i, Bytes::from(data.clone())))
-                            .ok_or_else(|| {
-                                Error::Generic(format!("Missing chunk: {}", hex::encode(hash)))
-                            })
-                    })
-                    .collect()
-            };
+        let get_chunk_parallel = |hashes: &[(usize, XorName)]| -> Result<Vec<(usize, Bytes)>> {
+            hashes
+                .iter()
+                .map(|(i, hash)| {
+                    stored_clone
+                        .get(hash)
+                        .map(|data| (*i, Bytes::from(data.clone())))
+                        .ok_or_else(|| {
+                            Error::Generic(format!("Missing chunk: {}", hex::encode(hash)))
+                        })
+                })
+                .collect()
+        };
 
         // Decrypt using streaming_decrypt
         let decrypt_stream = streaming_decrypt(&shrunk_map, &get_chunk_parallel)?;

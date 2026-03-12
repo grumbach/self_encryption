@@ -313,18 +313,16 @@ pub fn decrypt_from_storage(
             .collect()
     };
 
-    let stream = self_encryption::streaming_decrypt(&data_map.0, &get_chunk_parallel)
-        .map_err(map_error)?;
+    let stream =
+        self_encryption::streaming_decrypt(&data_map.0, &get_chunk_parallel).map_err(map_error)?;
 
-    let mut output = std::fs::File::create(output_path).map_err(|e| {
-        napi::Error::from_reason(format!("Failed to create output file: {e}"))
-    })?;
+    let mut output = std::fs::File::create(output_path)
+        .map_err(|e| napi::Error::from_reason(format!("Failed to create output file: {e}")))?;
 
     for chunk_result in stream {
         let chunk = chunk_result.map_err(map_error)?;
-        std::io::Write::write_all(&mut output, &chunk).map_err(|e| {
-            napi::Error::from_reason(format!("Failed to write output: {e}"))
-        })?;
+        std::io::Write::write_all(&mut output, &chunk)
+            .map_err(|e| napi::Error::from_reason(format!("Failed to write output: {e}")))?;
     }
 
     Ok(())
@@ -339,7 +337,7 @@ pub fn streaming_decrypt_from_storage(
     env: Env,
     data_map: &DataMap,
     output_file: String,
-    #[napi(ts_arg_type = "(xorNames: XorName[]) => Uint8Array")] get_chunk_parallel: JsFunction,
+    #[napi(ts_arg_type = "(xorNames: XorName[]) => Uint8Array[]")] get_chunk_parallel: JsFunction,
 ) -> Result<()> {
     use std::io::Write;
 

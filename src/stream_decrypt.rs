@@ -100,7 +100,8 @@ where
         for (info, (_index, encrypted_content)) in
             batch_infos.iter().zip(fetched_chunks.into_iter())
         {
-            let decrypted_chunk = decrypt_chunk(info.index, &encrypted_content, &self.src_hashes)?;
+            let decrypted_chunk =
+                decrypt_chunk(info.index, &encrypted_content, &self.src_hashes, 0)?;
             self.current_batch_chunks.push(decrypted_chunk);
         }
 
@@ -212,7 +213,7 @@ where
         let mut all_bytes = Vec::new();
         for chunk_index in start_chunk..=end_chunk {
             if let Some(encrypted_content) = chunk_map.get(&chunk_index) {
-                let decrypted = decrypt_chunk(chunk_index, encrypted_content, &self.src_hashes)?;
+                let decrypted = decrypt_chunk(chunk_index, encrypted_content, &self.src_hashes, 0)?;
                 all_bytes.extend_from_slice(&decrypted);
             }
         }

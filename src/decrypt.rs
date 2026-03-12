@@ -15,12 +15,13 @@ use xor_name::XorName;
 pub fn decrypt_sorted_set(
     src_hashes: Vec<XorName>,
     encrypted_chunks: &[&EncryptedChunk],
+    child_level: usize,
 ) -> Result<Bytes> {
     let mut all_bytes = Vec::new();
 
     // Process chunks sequentially to maintain proper boundaries
     for (chunk_index, chunk) in encrypted_chunks.iter().enumerate() {
-        let decrypted = decrypt_chunk(chunk_index, &chunk.content, &src_hashes)?;
+        let decrypted = decrypt_chunk(chunk_index, &chunk.content, &src_hashes, child_level)?;
         all_bytes.extend_from_slice(&decrypted);
     }
 
@@ -29,8 +30,13 @@ pub fn decrypt_sorted_set(
 
 /// Decrypt a chunk, given the index of that chunk in the sequence of chunks,
 /// and the raw encrypted content.
-pub fn decrypt_chunk(chunk_index: usize, content: &Bytes, src_hashes: &[XorName]) -> Result<Bytes> {
-    let pki = get_pad_key_and_nonce(chunk_index, src_hashes)?;
+pub fn decrypt_chunk(
+    chunk_index: usize,
+    content: &Bytes,
+    src_hashes: &[XorName],
+    child_level: usize,
+) -> Result<Bytes> {
+    let pki = get_pad_key_and_nonce(chunk_index, src_hashes, child_level)?;
     let (pad, key, nonce) = pki;
 
     // First remove the XOR obfuscation

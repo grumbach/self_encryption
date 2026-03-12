@@ -382,15 +382,18 @@ pub fn encrypt_from_file(input_file: &str, output_dir: &str) -> PyResult<(PyData
     Ok((PyDataMap { inner: data_map }, chunk_names))
 }
 
-/// Decrypt data using a DataMap and stored chunks.
+/// Decrypt data using a DataMap and stored chunks (single-chunk callback).
 ///
-/// This function retrieves encrypted chunks using the provided callback,
-/// decrypts them according to the DataMap, and writes the result to a file.
+/// This function retrieves encrypted chunks one at a time using the provided
+/// callback, decrypts them according to the DataMap, and writes the result
+/// to a file.
 ///
 /// Args:
 ///     data_map (PyDataMap): The data map containing chunk metadata.
 ///     output_file (str): Path where the decrypted data will be written.
-///     get_chunk (callable): Function that takes a chunk name and returns its bytes.
+///     get_chunk (callable): A function with signature `get_chunk(name: str) -> bytes`
+///         that retrieves a single encrypted chunk by its hex-encoded XorName.
+///         Returns the raw chunk bytes.
 ///
 /// Raises:
 ///     OSError: If chunks cannot be retrieved or output cannot be written.
@@ -404,28 +407,28 @@ pub fn decrypt_from_storage(
     let output_path = Path::new(output_file);
 
     // Wrap the single-chunk callback into a parallel batch callback for streaming_decrypt
-    let get_chunk_parallel =
-        |hashes: &[(usize, XorName)]| -> crate::Result<Vec<(usize, Bytes)>> {
-            hashes
-                .iter()
-                .map(|(i, hash)| {
-                    let name_str = hex::encode(hash.0);
-                    let chunk = get_chunk.call1((name_str,)).map_err(|e| {
-                        crate::Error::Python(format!("Failed to call get_chunk: {e}"))
-                    })?;
-                    let bytes = chunk.downcast::<PyBytes>().map_err(|e| {
-                        crate::Error::Python(format!("get_chunk must return bytes: {e}"))
-                    })?;
-                    Ok((*i, Bytes::copy_from_slice(bytes.as_bytes())))
-                })
-                .collect()
-        };
+    let get_chunk_parallel = |hashes: &[(usize, XorName)]| -> crate::Result<Vec<(usize, Bytes)>> {
+        hashes
+            .iter()
+            .map(|(i, hash)| {
+                let name_str = hex::encode(hash.0);
+                let chunk = get_chunk
+                    .call1((name_str,))
+                    .map_err(|e| crate::Error::Python(format!("Failed to call get_chunk: {e}")))?;
+                let bytes = chunk.downcast::<PyBytes>().map_err(|e| {
+                    crate::Error::Python(format!("get_chunk must return bytes: {e}"))
+                })?;
+                Ok((*i, Bytes::copy_from_slice(bytes.as_bytes())))
+            })
+            .collect()
+    };
 
     let stream = crate::streaming_decrypt(&data_map.inner, &get_chunk_parallel)
         .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Decryption failed: {e}")))?;
 
-    let mut output = std::fs::File::create(output_path)
-        .map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("Failed to create output: {e}")))?;
+    let mut output = std::fs::File::create(output_path).map_err(|e| {
+        pyo3::exceptions::PyOSError::new_err(format!("Failed to create output: {e}"))
+    })?;
 
     for chunk_result in stream {
         let chunk = chunk_result
@@ -437,18 +440,22 @@ pub fn decrypt_from_storage(
     Ok(())
 }
 
-/// Decrypt data using streaming for better performance with large files.
+/// Decrypt data using streaming for better performance with large files (batch callback).
 ///
-/// This function uses parallel processing and streaming to efficiently
+/// This function uses batch chunk retrieval and streaming to efficiently
 /// decrypt large files while minimizing memory usage.
 ///
 /// Args:
 ///     data_map (PyDataMap): The data map containing chunk metadata.
 ///     output_file (str): Path where the decrypted data will be written.
-///     get_chunks (callable): Function that takes a list of (index, chunk_name) tuples
-///                           and returns a list of (index, bytes) tuples.
-///                           Example: get_chunks([(0, "abc123"), (1, "def456")])
-///                           should return [(0, b"chunk0_data"), (1, b"chunk1_data")]
+///     get_chunks (callable): A function with signature
+///         `get_chunks(names: list[tuple[int, str]]) -> list[tuple[int, bytes]]`
+///         that retrieves multiple encrypted chunks in one call.
+///         Input: list of `(chunk_index, hex_encoded_xorname)` tuples.
+///         Output: list of `(chunk_index, raw_chunk_bytes)` tuples.
+///         Example:
+///             get_chunks([(0, "abc123..."), (1, "def456...")])
+///             -> [(0, b"chunk0_data"), (1, b"chunk1_data")]
 ///
 /// Raises:
 ///     OSError: If chunks cannot be retrieved or output cannot be written.

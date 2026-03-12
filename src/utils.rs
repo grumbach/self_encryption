@@ -19,6 +19,7 @@ pub fn extract_hashes(data_map: &crate::DataMap) -> Vec<XorName> {
 pub(crate) fn get_pad_key_and_nonce(
     chunk_index: usize,
     chunk_hashes: &[XorName],
+    child_level: usize,
 ) -> crate::Result<(Pad, Key, Nonce)> {
     let (n_1, n_2) = get_n_1_n_2(chunk_index, chunk_hashes.len())?;
 
@@ -32,7 +33,13 @@ pub(crate) fn get_pad_key_and_nonce(
         .get(n_2)
         .ok_or_else(|| crate::Error::Generic(format!("n_2 index {n_2} out of bounds")))?;
 
-    Ok(get_pki(src_hash, n_1_src_hash, n_2_src_hash))
+    Ok(get_pki(
+        src_hash,
+        n_1_src_hash,
+        n_2_src_hash,
+        chunk_index,
+        child_level,
+    ))
 }
 
 pub(crate) fn get_n_1_n_2(
@@ -55,27 +62,33 @@ pub(crate) fn get_pki(
     src_hash: &XorName,
     n_1_src_hash: &XorName,
     n_2_src_hash: &XorName,
+    chunk_index: usize,
+    child_level: usize,
 ) -> (Pad, Key, Nonce) {
+    // Domain-separated BLAKE3 KDF with full chunk context.
+    // Including src_hash ensures that two different chunks sharing the same
+    // predecessors (n_1, n_2) will derive different (key, nonce) pairs,
+    // eliminating the nonce-reuse hazard in ChaCha20-Poly1305.
+    let mut context_material = Vec::with_capacity(32 + 32 + 32 + 8 + 8);
+    context_material.extend_from_slice(&src_hash.0);
+    context_material.extend_from_slice(&n_1_src_hash.0);
+    context_material.extend_from_slice(&n_2_src_hash.0);
+    context_material.extend_from_slice(&(chunk_index as u64).to_le_bytes());
+    context_material.extend_from_slice(&(child_level as u64).to_le_bytes());
+
+    let mut output = [0u8; PAD_SIZE + KEY_SIZE + NONCE_SIZE];
+    let mut hasher = blake3::Hasher::new_derive_key("self_encryption/chunk/v2");
+    let _ = hasher.update(&context_material);
+    let mut output_reader = hasher.finalize_xof();
+    output_reader.fill(&mut output);
+
     let mut pad = [0u8; PAD_SIZE];
     let mut key = [0u8; KEY_SIZE];
     let mut nonce = [0u8; NONCE_SIZE];
 
-    for (pad_el, element) in pad
-        .iter_mut()
-        .zip(src_hash.iter().chain(n_2_src_hash.iter()))
-    {
-        *pad_el = *element;
-    }
-
-    // Key: full 32 bytes from n_1_src_hash
-    for (key_el, element) in key.iter_mut().zip(n_1_src_hash.iter()) {
-        *key_el = *element;
-    }
-
-    // Nonce: first 12 bytes from n_2_src_hash
-    for (nonce_el, element) in nonce.iter_mut().zip(n_2_src_hash.iter()) {
-        *nonce_el = *element;
-    }
+    pad.copy_from_slice(&output[..PAD_SIZE]);
+    key.copy_from_slice(&output[PAD_SIZE..PAD_SIZE + KEY_SIZE]);
+    nonce.copy_from_slice(&output[PAD_SIZE + KEY_SIZE..]);
 
     (Pad(pad), Key(key), Nonce(nonce))
 }
@@ -184,5 +197,74 @@ pub(crate) fn get_chunk_index(file_size: usize, position: usize) -> usize {
         usize::min(position / chunk_size, num_chunks - 1)
     } else {
         num_chunks - 1
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_different_chunks_same_predecessors_yield_different_key_nonce() {
+        let n1 = XorName([0xAA; 32]);
+        let n2 = XorName([0xBB; 32]);
+
+        let src_hash_a = XorName([0x01; 32]);
+        let src_hash_b = XorName([0x02; 32]);
+
+        let (pad_a, key_a, nonce_a) = get_pki(&src_hash_a, &n1, &n2, 0, 0);
+        let (pad_b, key_b, nonce_b) = get_pki(&src_hash_b, &n1, &n2, 0, 0);
+
+        assert_ne!(
+            key_a.0, key_b.0,
+            "different src_hash must produce different keys"
+        );
+        assert_ne!(
+            nonce_a.0, nonce_b.0,
+            "different src_hash must produce different nonces"
+        );
+        assert_ne!(
+            pad_a.0, pad_b.0,
+            "different src_hash must produce different pads"
+        );
+    }
+
+    #[test]
+    fn test_kdf_domain_separation_by_chunk_index() {
+        let src = XorName([0x11; 32]);
+        let n1 = XorName([0x22; 32]);
+        let n2 = XorName([0x33; 32]);
+
+        let (_, key_0, nonce_0) = get_pki(&src, &n1, &n2, 0, 0);
+        let (_, key_1, nonce_1) = get_pki(&src, &n1, &n2, 1, 0);
+
+        assert_ne!(
+            key_0.0, key_1.0,
+            "different chunk_index must produce different keys"
+        );
+        assert_ne!(
+            nonce_0.0, nonce_1.0,
+            "different chunk_index must produce different nonces"
+        );
+    }
+
+    #[test]
+    fn test_kdf_domain_separation_by_child_level() {
+        let src = XorName([0x11; 32]);
+        let n1 = XorName([0x22; 32]);
+        let n2 = XorName([0x33; 32]);
+
+        let (_, key_c0, nonce_c0) = get_pki(&src, &n1, &n2, 0, 0);
+        let (_, key_c1, nonce_c1) = get_pki(&src, &n1, &n2, 0, 1);
+
+        assert_ne!(
+            key_c0.0, key_c1.0,
+            "different child_level must produce different keys"
+        );
+        assert_ne!(
+            nonce_c0.0, nonce_c1.0,
+            "different child_level must produce different nonces"
+        );
     }
 }
