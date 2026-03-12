@@ -33,27 +33,10 @@ impl DataMap {
         bincode::serialize(self)
     }
 
-    /// Deserialize DataMap from bytes (v1 versioned format)
+    /// Deserialize DataMap from bytes (v1 versioned format).
+    /// Delegates to the `Deserialize` impl which handles version checking.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        #[derive(Deserialize)]
-        struct VersionedDataMap {
-            version: u8,
-            chunk_identifiers: Vec<ChunkInfo>,
-            child: Option<usize>,
-        }
-
-        let versioned = bincode::deserialize::<VersionedDataMap>(bytes)?;
-        if versioned.version == 1 {
-            Ok(DataMap {
-                chunk_identifiers: versioned.chunk_identifiers,
-                child: versioned.child,
-            })
-        } else {
-            Err(Box::new(bincode::ErrorKind::Custom(format!(
-                "unsupported DataMap version: {ver}",
-                ver = versioned.version
-            ))))
-        }
+        bincode::deserialize(bytes)
     }
 }
 

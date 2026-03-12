@@ -153,6 +153,14 @@ pub const COMPRESSION_QUALITY: i32 = 6;
 /// Encrypts a set of bytes and returns the encrypted data together with
 /// the data map that is derived from the input data.
 pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
+    encrypt_with_child_level(bytes, 0)
+}
+
+/// Internal encryption that accepts a child_level for KDF domain separation.
+fn encrypt_with_child_level(
+    bytes: Bytes,
+    child_level: usize,
+) -> Result<(DataMap, Vec<EncryptedChunk>)> {
     let file_size = bytes.len();
     if file_size < MIN_ENCRYPTABLE_BYTES {
         return Err(Error::Generic(format!(
@@ -186,7 +194,7 @@ pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
         }
 
         // For chunks 2 onwards, we can encrypt immediately since we have the previous two hashes
-        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes, 0)?;
+        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes, child_level)?;
         let encrypted_content = encrypt::encrypt_chunk(chunk_data, pki)?;
         let dst_hash = hash::content_hash(&encrypted_content);
 
@@ -204,7 +212,7 @@ pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
 
     // Now process the first two chunks using the complete set of source hashes
     for (chunk_index, chunk_data, src_hash, src_size) in first_chunks {
-        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes, 0)?;
+        let pki = get_pad_key_and_nonce(chunk_index, &src_hashes, child_level)?;
         let encrypted_content = encrypt::encrypt_chunk(chunk_data, pki)?;
         let dst_hash = hash::content_hash(&encrypted_content);
 
@@ -252,8 +260,7 @@ pub fn encrypt(bytes: Bytes) -> Result<(DataMap, Vec<EncryptedChunk>)> {
 /// * `Result<Bytes>` - The decrypted data or an error if chunks are missing/corrupted
 pub(crate) fn decrypt_full_set(data_map: &DataMap, chunks: &[EncryptedChunk]) -> Result<Bytes> {
     let src_hashes = extract_hashes(data_map);
-    // encrypt() always uses child_level=0 for key derivation, so decrypt must match
-    let child_level = 0;
+    let child_level = data_map.child().unwrap_or(0);
 
     // Create a mapping of chunk hashes to chunks for efficient lookup
     let chunk_map: HashMap<XorName, &EncryptedChunk> = chunks
@@ -327,8 +334,12 @@ pub(crate) fn decrypt_range(
     let mut all_bytes = Vec::new();
     for (idx, chunk) in sorted_chunks.iter().enumerate() {
         let chunk_idx = start_chunk + idx;
-        // encrypt() always uses child_level=0 for key derivation, so decrypt must match
-        let decrypted = decrypt_chunk(chunk_idx, &chunk.content, &src_hashes, 0)?;
+        let decrypted = decrypt_chunk(
+            chunk_idx,
+            &chunk.content,
+            &src_hashes,
+            data_map.child().unwrap_or(0),
+        )?;
         all_bytes.extend_from_slice(&decrypted);
     }
 
@@ -362,13 +373,14 @@ where
     let mut all_chunks = Vec::new();
 
     while data_map.len() > 3 {
-        let child_level = data_map.child().unwrap_or(0);
+        let next_child_level = data_map.child().map_or(1, |c| c + 1);
         let bytes = data_map
             .to_bytes()
             .map(Bytes::from)
             .map_err(|e| Error::Generic(format!("Failed to serialize data map: {e}")))?;
 
-        let (mut new_data_map, encrypted_chunks) = encrypt(bytes)?;
+        let (mut new_data_map, encrypted_chunks) =
+            encrypt_with_child_level(bytes, next_child_level)?;
 
         // Store and collect chunks
         for chunk in &encrypted_chunks {
@@ -376,8 +388,8 @@ where
         }
         all_chunks.extend(encrypted_chunks);
 
-        // Update data map for next iteration
-        new_data_map = DataMap::with_child(new_data_map.infos().to_vec(), child_level + 1);
+        // Tag the DataMap with the child_level used during encryption
+        new_data_map = DataMap::with_child(new_data_map.infos().to_vec(), next_child_level);
         data_map = new_data_map;
     }
     Ok((data_map, all_chunks))

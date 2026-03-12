@@ -967,26 +967,14 @@ fn test_stream_encrypt_file_decrypt_storage_cross() -> Result<()> {
 
 #[test]
 fn test_file_encrypt_stream_decrypt_cross() -> Result<()> {
+    // Use standard encrypt() then streaming decrypt — cross-compatibility test
     let data_size = 150_000;
     let original_data = random_bytes(data_size);
 
-    let mut stream = stream_encrypt(
-        data_size,
-        original_data.chunks(8192).map(|c| Bytes::from(c.to_vec())),
-    )?;
-
-    let mut storage = HashMap::new();
-    for chunk_result in stream.chunks() {
-        let (hash, content) = chunk_result?;
-        let _ = storage.insert(hash, content.to_vec());
-    }
-
-    let data_map = stream
-        .datamap()
-        .ok_or_else(|| Error::Generic("No DataMap".to_string()))?
-        .clone();
-
+    let (data_map, encrypted_chunks) = encrypt(original_data.clone())?;
+    let storage = build_chunk_storage(&encrypted_chunks);
     let fetcher = make_parallel_fetcher(&storage);
+
     let decrypt_stream = streaming_decrypt(&data_map, fetcher)?;
     let decrypted = decrypt_stream.range_full()?;
 
@@ -1297,6 +1285,40 @@ fn test_aead_tag_protects_integrity() -> Result<()> {
     Ok(())
 }
 
+// --- AEAD pipeline integrity test ---
+
+#[test]
+fn test_aead_rejects_tampered_ciphertext_through_pipeline() -> Result<()> {
+    use self_encryption::decrypt_chunk;
+
+    let original_data = random_bytes(10_000);
+    let (data_map, encrypted_chunks) = encrypt(original_data)?;
+
+    // Extract the src_hashes from the data map (the valid ones used during encryption)
+    let src_hashes: Vec<XorName> = data_map.infos().iter().map(|info| info.src_hash).collect();
+
+    // Take the first chunk's encrypted content and tamper with it
+    let first_chunk = encrypted_chunks
+        .first()
+        .ok_or_else(|| Error::Generic("no chunks".to_string()))?;
+    let mut tampered_content = first_chunk.content.to_vec();
+    let mid = tampered_content.len() / 2;
+    if let Some(byte) = tampered_content.get_mut(mid) {
+        *byte ^= 0xFF;
+    }
+    let tampered_bytes = Bytes::from(tampered_content);
+
+    // Call decrypt_chunk directly with valid src_hashes but tampered ciphertext
+    // This proves the AEAD layer (not hash lookup) is the integrity gate
+    let result = decrypt_chunk(0, &tampered_bytes, &src_hashes, 0);
+    assert!(
+        result.is_err(),
+        "decrypt_chunk should fail on tampered ciphertext due to AEAD tag verification"
+    );
+
+    Ok(())
+}
+
 // --- Task 17: Verify BLAKE3 is used for hashing ---
 
 #[test]
@@ -1327,19 +1349,10 @@ fn test_encrypted_chunk_dst_hash_is_blake3() -> Result<()> {
     Ok(())
 }
 
-// --- Task 18: Verify key derivation sizes ---
+// --- Task 18: Verify key derivation sizes and roundtrip ---
 
 #[test]
-fn test_key_derivation_sizes() -> Result<()> {
-    // Key derivation internals are tested indirectly through encrypt/decrypt roundtrips,
-    // but we can verify the constant sizes are correct for ChaCha20-Poly1305.
-    use self_encryption::hash::content_hash;
-
-    let h1 = content_hash(b"hash1");
-    let h2 = content_hash(b"hash2");
-    let h3 = content_hash(b"hash3");
-    let hashes = vec![h1, h2, h3];
-
+fn test_key_derivation_sizes_and_roundtrip() -> Result<()> {
     // XorName is 32 bytes
     assert_eq!(std::mem::size_of::<XorName>(), 32);
 
@@ -1354,11 +1367,6 @@ fn test_key_derivation_sizes() -> Result<()> {
     for info in data_map.infos() {
         assert_ne!(info.src_hash, XorName::default());
         assert_ne!(info.dst_hash, XorName::default());
-    }
-
-    // Verify hashes are 32 bytes (BLAKE3 output = XorName size)
-    for hash in &hashes {
-        assert_eq!(hash.0.len(), 32);
     }
 
     Ok(())
