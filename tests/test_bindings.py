@@ -68,8 +68,8 @@ def test_streaming_decryption():
         # Define chunk getter
         def get_chunks(chunk_names: list) -> list:
             return [
-                (Path(chunk_dir) / chunk_name).read_bytes()
-                for chunk_name in chunk_names
+                (index, (Path(chunk_dir) / name).read_bytes())
+                for index, name in chunk_names
             ]
         
         # Decrypt using streaming

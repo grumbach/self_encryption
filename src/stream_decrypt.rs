@@ -970,7 +970,9 @@ mod tests {
 
         // Use the new get_chunk_index_from_infos method instead of the utility function
         let start_chunk_index = mock_stream.get_chunk_index_from_infos(start_position);
-        println!("Calculated start_chunk_index using get_chunk_index_from_infos: {start_chunk_index}");
+        println!(
+            "Calculated start_chunk_index using get_chunk_index_from_infos: {start_chunk_index}"
+        );
 
         // Test get_chunk_start_position
         let start_chunk_pos = mock_stream.get_chunk_start_position(start_chunk_index);
