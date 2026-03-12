@@ -28,6 +28,7 @@ use xor_name::XorName;
 pub struct DecryptionStream<F> {
     chunk_infos: Vec<ChunkInfo>,
     src_hashes: Vec<XorName>,
+    child_level: usize,
     get_chunk_parallel: F,
     current_batch_start: usize,
     current_batch_chunks: Vec<Bytes>,
@@ -51,6 +52,7 @@ where
             data_map.clone()
         };
 
+        let child_level = root_map.child().unwrap_or(0);
         let mut chunk_infos = root_map.infos().to_vec();
         chunk_infos.sort_by_key(|info| info.index);
         let src_hashes = extract_hashes(&root_map);
@@ -58,6 +60,7 @@ where
         Ok(Self {
             chunk_infos,
             src_hashes,
+            child_level,
             get_chunk_parallel,
             current_batch_start: 0,
             current_batch_chunks: Vec::new(),
@@ -100,8 +103,12 @@ where
         for (info, (_index, encrypted_content)) in
             batch_infos.iter().zip(fetched_chunks.into_iter())
         {
-            let decrypted_chunk =
-                decrypt_chunk(info.index, &encrypted_content, &self.src_hashes, 0)?;
+            let decrypted_chunk = decrypt_chunk(
+                info.index,
+                &encrypted_content,
+                &self.src_hashes,
+                self.child_level,
+            )?;
             self.current_batch_chunks.push(decrypted_chunk);
         }
 
@@ -213,7 +220,12 @@ where
         let mut all_bytes = Vec::new();
         for chunk_index in start_chunk..=end_chunk {
             if let Some(encrypted_content) = chunk_map.get(&chunk_index) {
-                let decrypted = decrypt_chunk(chunk_index, encrypted_content, &self.src_hashes, 0)?;
+                let decrypted = decrypt_chunk(
+                    chunk_index,
+                    encrypted_content,
+                    &self.src_hashes,
+                    self.child_level,
+                )?;
                 all_bytes.extend_from_slice(&decrypted);
             }
         }
@@ -962,6 +974,7 @@ mod tests {
         let mock_stream = DecryptionStream {
             chunk_infos: data_map.infos().to_vec(),
             src_hashes: vec![crate::hash::content_hash(&[0u8]); num_chunks], // Dummy hashes
+            child_level: 0,
             get_chunk_parallel,
             current_batch_start: 0,
             current_batch_chunks: Vec::new(),

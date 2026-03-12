@@ -246,7 +246,7 @@ impl PyEncryptedChunk {
     /// Get the hash of the encrypted chunk.
     ///
     /// Returns:
-    ///     bytes: The SHA256 hash of the encrypted chunk.
+    ///     bytes: The BLAKE3 hash of the encrypted chunk.
     pub fn hash(&self) -> Cow<'_, [u8]> {
         crate::hash::content_hash(&self.inner.content)
             .0
