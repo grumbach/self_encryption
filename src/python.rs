@@ -345,6 +345,11 @@ pub fn encrypt_from_file(input_file: &str, output_dir: &str) -> PyResult<(PyData
         .len() as usize;
     let mut reader = std::io::BufReader::new(file);
 
+    // Track read errors so they aren't silently swallowed by the iterator
+    let read_error: std::rc::Rc<std::cell::RefCell<Option<std::io::Error>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let read_error_clone = read_error.clone();
+
     let data_iter = std::iter::from_fn(move || {
         let mut buffer = vec![0u8; 8192];
         match reader.read(&mut buffer) {
@@ -353,7 +358,10 @@ pub fn encrypt_from_file(input_file: &str, output_dir: &str) -> PyResult<(PyData
                 buffer.truncate(n);
                 Some(Bytes::from(buffer))
             }
-            Err(_) => None,
+            Err(e) => {
+                *read_error_clone.borrow_mut() = Some(e);
+                None
+            }
         }
     });
 
@@ -375,8 +383,16 @@ pub fn encrypt_from_file(input_file: &str, output_dir: &str) -> PyResult<(PyData
         })?;
     }
 
+    if let Some(e) = read_error.borrow_mut().take() {
+        return Err(pyo3::exceptions::PyOSError::new_err(format!(
+            "Failed to read input file: {e}"
+        )));
+    }
+
     let data_map = stream.into_datamap().ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err("Encryption did not produce a DataMap")
+        pyo3::exceptions::PyValueError::new_err(
+            "Encryption did not produce a DataMap — ensure chunks() iterator was fully consumed",
+        )
     })?;
 
     Ok((PyDataMap { inner: data_map }, chunk_names))

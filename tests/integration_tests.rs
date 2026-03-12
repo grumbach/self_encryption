@@ -873,16 +873,15 @@ fn make_parallel_fetcher(
     }
 }
 
-// --- Task 5: stream_encrypt + streaming_decrypt roundtrip ---
-
-#[test]
-fn test_stream_encrypt_decrypt_roundtrip() -> Result<()> {
-    let data_size = 100_000;
+/// Helper: stream-encrypt data with a given iterator chunk size, then stream-decrypt and verify.
+fn assert_stream_roundtrip(data_size: usize, iter_chunk_size: usize) -> Result<()> {
     let original_data = random_bytes(data_size);
 
     let mut stream = stream_encrypt(
         data_size,
-        original_data.chunks(4096).map(|c| Bytes::from(c.to_vec())),
+        original_data
+            .chunks(iter_chunk_size)
+            .map(|c| Bytes::from(c.to_vec())),
     )?;
 
     let mut storage = HashMap::new();
@@ -893,37 +892,7 @@ fn test_stream_encrypt_decrypt_roundtrip() -> Result<()> {
 
     let data_map = stream
         .datamap()
-        .ok_or_else(|| Error::Generic("No DataMap after stream_encrypt".to_string()))?;
-
-    let fetcher = make_parallel_fetcher(&storage);
-    let decrypt_stream = streaming_decrypt(data_map, fetcher)?;
-    let decrypted = decrypt_stream.range_full()?;
-
-    assert_eq!(decrypted.as_ref(), &original_data[..]);
-    Ok(())
-}
-
-// --- Task 6: stream_encrypt + streaming_decrypt roundtrip ---
-
-#[test]
-fn test_file_stream_encrypt_decrypt_roundtrip() -> Result<()> {
-    let data_size = 200_000;
-    let original_data = random_bytes(data_size);
-
-    let mut stream = stream_encrypt(
-        data_size,
-        original_data.chunks(8192).map(|c| Bytes::from(c.to_vec())),
-    )?;
-
-    let mut storage = HashMap::new();
-    for chunk_result in stream.chunks() {
-        let (hash, content) = chunk_result?;
-        let _ = storage.insert(hash, content.to_vec());
-    }
-
-    let data_map = stream
-        .datamap()
-        .ok_or_else(|| Error::Generic("No DataMap".to_string()))?
+        .ok_or_else(|| Error::Generic("No DataMap after stream_encrypt".to_string()))?
         .clone();
 
     let fetcher = make_parallel_fetcher(&storage);
@@ -934,30 +903,29 @@ fn test_file_stream_encrypt_decrypt_roundtrip() -> Result<()> {
     Ok(())
 }
 
-// --- Task 7: Cross-compatibility between streaming APIs ---
+#[test]
+fn test_stream_encrypt_decrypt_roundtrip() -> Result<()> {
+    assert_stream_roundtrip(100_000, 4096)
+}
+
+#[test]
+fn test_file_stream_encrypt_decrypt_roundtrip() -> Result<()> {
+    assert_stream_roundtrip(200_000, 8192)
+}
 
 #[test]
 fn test_stream_encrypt_file_decrypt_storage_cross() -> Result<()> {
-    let data_size = 150_000;
+    assert_stream_roundtrip(150_000, 8192)
+}
+
+/// Helper: standard encrypt() then streaming_decrypt() cross-compatibility check.
+fn assert_encrypt_then_stream_decrypt(data_size: usize) -> Result<()> {
     let original_data = random_bytes(data_size);
 
-    let mut stream = stream_encrypt(
-        data_size,
-        original_data.chunks(8192).map(|c| Bytes::from(c.to_vec())),
-    )?;
-
-    let mut storage = HashMap::new();
-    for chunk_result in stream.chunks() {
-        let (hash, content) = chunk_result?;
-        let _ = storage.insert(hash, content.to_vec());
-    }
-
-    let data_map = stream
-        .datamap()
-        .ok_or_else(|| Error::Generic("No DataMap".to_string()))?
-        .clone();
-
+    let (data_map, encrypted_chunks) = encrypt(original_data.clone())?;
+    let storage = build_chunk_storage(&encrypted_chunks);
     let fetcher = make_parallel_fetcher(&storage);
+
     let decrypt_stream = streaming_decrypt(&data_map, fetcher)?;
     let decrypted = decrypt_stream.range_full()?;
 
@@ -967,37 +935,12 @@ fn test_stream_encrypt_file_decrypt_storage_cross() -> Result<()> {
 
 #[test]
 fn test_file_encrypt_stream_decrypt_cross() -> Result<()> {
-    // Use standard encrypt() then streaming decrypt — cross-compatibility test
-    let data_size = 150_000;
-    let original_data = random_bytes(data_size);
-
-    let (data_map, encrypted_chunks) = encrypt(original_data.clone())?;
-    let storage = build_chunk_storage(&encrypted_chunks);
-    let fetcher = make_parallel_fetcher(&storage);
-
-    let decrypt_stream = streaming_decrypt(&data_map, fetcher)?;
-    let decrypted = decrypt_stream.range_full()?;
-
-    assert_eq!(decrypted.as_ref(), &original_data[..]);
-    Ok(())
+    assert_encrypt_then_stream_decrypt(150_000)
 }
-
-// --- Task 8: In-memory encrypt ↔ streaming decrypt cross-compatibility ---
 
 #[test]
 fn test_memory_encrypt_stream_decrypt() -> Result<()> {
-    let data_size = 100_000;
-    let original_data = random_bytes(data_size);
-
-    let (data_map, encrypted_chunks) = encrypt(original_data.clone())?;
-    let storage = build_chunk_storage(&encrypted_chunks);
-    let fetcher = make_parallel_fetcher(&storage);
-
-    let decrypt_stream = streaming_decrypt(&data_map, fetcher)?;
-    let decrypted = decrypt_stream.range_full()?;
-
-    assert_eq!(decrypted.as_ref(), &original_data[..]);
-    Ok(())
+    assert_encrypt_then_stream_decrypt(100_000)
 }
 
 #[test]

@@ -246,22 +246,17 @@ fn debug_bytes<V: AsRef<[u8]>>(input: V) -> String {
         }
         return ret;
     }
-    match (input_ref.first(), input_ref.get(1), input_ref.get(2)) {
-        (Some(a), Some(b), Some(c)) => {
-            let len = input_ref.len();
-            match (
-                input_ref.get(len - 3),
-                input_ref.get(len - 2),
-                input_ref.get(len - 1),
-            ) {
-                (Some(x), Some(y), Some(z)) => {
-                    format!("{a:02x}{b:02x}{c:02x}..{x:02x}{y:02x}{z:02x}")
-                }
-                _ => "<error>".to_owned(),
-            }
-        }
-        _ => "<error>".to_owned(),
-    }
+    // Safety: len > 6 is guaranteed by the early return above, so all indices are valid.
+    let len = input_ref.len();
+    format!(
+        "{:02x}{:02x}{:02x}..{:02x}{:02x}{:02x}",
+        input_ref[0],
+        input_ref[1],
+        input_ref[2],
+        input_ref[len - 3],
+        input_ref[len - 2],
+        input_ref[len - 1]
+    )
 }
 
 impl Debug for ChunkInfo {

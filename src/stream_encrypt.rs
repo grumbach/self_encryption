@@ -602,7 +602,8 @@ impl<I> EncryptionStream<I> {
     /// # Ok(())
     /// # }
     /// ```
-    /// Returns the final DataMap, or `None` if encryption is not yet complete.
+    /// Returns the final DataMap, or `None` if encryption is not yet complete
+    /// (i.e., `chunks()` was not fully consumed).
     pub fn into_datamap(self) -> Option<DataMap> {
         self.final_datamap
     }
