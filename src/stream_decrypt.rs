@@ -910,10 +910,7 @@ mod tests {
         // Simulate different MAX_CHUNK_SIZE cheme
         let max_chunk_size = crate::MAX_CHUNK_SIZE * 2;
 
-        println!(
-            "Testing with file_size: {}, start_position: {}",
-            file_size, start_position
-        );
+        println!("Testing with file_size: {file_size}, start_position: {start_position}");
 
         // First, create the mock data map to use with get_chunk_index_from_infos
         // We need this to avoid dependency on MAX_CHUNK_SIZE utility functions
@@ -923,7 +920,7 @@ mod tests {
         // src_size values that match how the encryption algorithm would chunk the data.
 
         let num_chunks = crate::utils::get_num_chunks_with_variable_max(file_size, max_chunk_size);
-        println!("Total number of chunks: {}", num_chunks);
+        println!("Total number of chunks: {num_chunks}");
 
         let mut chunk_infos = Vec::new();
         let mut accumulated_size = 0;
@@ -973,16 +970,13 @@ mod tests {
 
         // Use the new get_chunk_index_from_infos method instead of the utility function
         let start_chunk_index = mock_stream.get_chunk_index_from_infos(start_position);
-        println!(
-            "Calculated start_chunk_index using get_chunk_index_from_infos: {}",
-            start_chunk_index
-        );
+        println!("Calculated start_chunk_index using get_chunk_index_from_infos: {start_chunk_index}");
 
         // Test get_chunk_start_position
         let start_chunk_pos = mock_stream.get_chunk_start_position(start_chunk_index);
 
-        println!("start_chunk_pos: {}", start_chunk_pos);
-        println!("start_position: {}", start_position);
+        println!("start_chunk_pos: {start_chunk_pos}");
+        println!("start_position: {start_position}");
 
         // Verify our expectations
         if start_chunk_pos <= start_position {
@@ -990,17 +984,17 @@ mod tests {
 
             if start_chunk_pos < start_position {
                 let diff = start_position - start_chunk_pos;
-                println!("Difference: {}", diff);
+                println!("Difference: {diff}");
 
-                // The difference should be less than MAX_CHUNK_SIZE
+                // The difference should be less than max_chunk_size (the local variable used for this test)
                 assert!(
-                    diff <= crate::MAX_CHUNK_SIZE,
+                    diff <= max_chunk_size,
                     "Difference {} should be less than {}, but got {}",
                     diff,
-                    crate::MAX_CHUNK_SIZE,
+                    max_chunk_size,
                     diff
                 );
-                println!("✓ Difference {} is less than MAX_CHUNK_SIZE", diff);
+                println!("✓ Difference {diff} is less than max_chunk_size");
             } else {
                 println!("start_chunk_pos exactly equals start_position");
             }
@@ -1015,7 +1009,7 @@ mod tests {
 
         // Additional verification: calculate what the internal_offset would be
         let internal_offset = start_position - start_chunk_pos;
-        println!("Calculated internal_offset: {}", internal_offset);
+        println!("Calculated internal_offset: {internal_offset}");
 
         // Verify this is reasonable (should be less than chunk size)
         // Get chunk size from the actual data map instead of utility function
@@ -1025,7 +1019,7 @@ mod tests {
             .find(|info| info.index == start_chunk_index)
             .map(|info| info.src_size)
             .unwrap_or(0);
-        println!("Chunk {} size: {}", start_chunk_index, chunk_size);
+        println!("Chunk {start_chunk_index} size: {chunk_size}");
 
         assert!(
             internal_offset < chunk_size,
