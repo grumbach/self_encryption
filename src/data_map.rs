@@ -7,7 +7,7 @@
 // permissions and limitations relating to use of the SAFE Network Software.
 
 use serde::{
-    de::{self, MapAccess, SeqAccess, Visitor},
+    de::{self, MapAccess, Visitor},
     ser::SerializeStruct,
     Deserialize, Deserializer, Serialize, Serializer,
 };
@@ -33,9 +33,8 @@ impl DataMap {
         bincode::serialize(self)
     }
 
-    /// Deserialize DataMap from bytes, handling both old and new formats
+    /// Deserialize DataMap from bytes (v1 versioned format)
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        // First, try to deserialize as the new versioned format
         #[derive(Deserialize)]
         struct VersionedDataMap {
             version: u8,
@@ -43,23 +42,17 @@ impl DataMap {
             child: Option<usize>,
         }
 
-        // Check if it's the new format by trying to deserialize it
-        if let Ok(versioned) = bincode::deserialize::<VersionedDataMap>(bytes) {
-            if versioned.version == 1 {
-                return Ok(DataMap {
-                    chunk_identifiers: versioned.chunk_identifiers,
-                    child: versioned.child,
-                });
-            }
-        }
-
-        // If that failed, try the old format (just Vec<ChunkInfo>)
-        match bincode::deserialize::<Vec<ChunkInfo>>(bytes) {
-            Ok(chunks) => Ok(DataMap {
-                chunk_identifiers: chunks,
-                child: None,
-            }),
-            Err(e) => Err(e),
+        let versioned = bincode::deserialize::<VersionedDataMap>(bytes)?;
+        if versioned.version == 1 {
+            Ok(DataMap {
+                chunk_identifiers: versioned.chunk_identifiers,
+                child: versioned.child,
+            })
+        } else {
+            Err(Box::new(bincode::ErrorKind::Custom(format!(
+                "unsupported DataMap version: {ver}",
+                ver = versioned.version
+            ))))
         }
     }
 }
@@ -156,7 +149,6 @@ impl<'de> Deserialize<'de> for DataMap {
     where
         D: Deserializer<'de>,
     {
-        // For formats that support deserialize_any (like JSON)
         if deserializer.is_human_readable() {
             struct DataMapVisitor;
 
@@ -164,25 +156,12 @@ impl<'de> Deserialize<'de> for DataMap {
                 type Value = DataMap;
 
                 fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                    write!(f, "either a Vec<ChunkInfo> (v0) or a struct (v1)")
+                    write!(
+                        f,
+                        "a DataMap struct with chunk_identifiers and optional child"
+                    )
                 }
 
-                // --- v0: the whole thing was just a sequence --------------------
-                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-                where
-                    A: SeqAccess<'de>,
-                {
-                    let mut chunks = Vec::new();
-                    while let Some(item) = seq.next_element()? {
-                        chunks.push(item);
-                    }
-                    Ok(DataMap {
-                        chunk_identifiers: chunks,
-                        child: None, // legacy files/network messages
-                    })
-                }
-
-                // --- v1: proper struct -----------------------------------------
                 fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
                 where
                     A: MapAccess<'de>,
@@ -204,16 +183,13 @@ impl<'de> Deserialize<'de> for DataMap {
                         chunks.ok_or_else(|| de::Error::missing_field("chunk_identifiers"))?;
                     Ok(DataMap {
                         chunk_identifiers,
-                        child: child.flatten(), // default to None if field absent
+                        child: child.flatten(),
                     })
                 }
             }
 
             deserializer.deserialize_any(DataMapVisitor)
         } else {
-            // For binary formats, we need to handle both old and new formats
-            // Since we can't peek with serde, we use a custom approach
-            // First try the versioned format, if it fails, try the old format
             #[derive(Deserialize)]
             struct VersionedDataMap {
                 version: u8,
@@ -221,20 +197,17 @@ impl<'de> Deserialize<'de> for DataMap {
                 child: Option<usize>,
             }
 
-            // Try to deserialize as versioned format first
-            match VersionedDataMap::deserialize(deserializer) {
-                Ok(versioned) if versioned.version == 1 => Ok(DataMap {
+            let versioned = VersionedDataMap::deserialize(deserializer)?;
+            if versioned.version == 1 {
+                Ok(DataMap {
                     chunk_identifiers: versioned.chunk_identifiers,
                     child: versioned.child,
-                }),
-                _ => {
-                    // If versioned format fails, we need to try the old format
-                    // However, we can't re-use the deserializer, so we need to use from_bytes
-                    // This is a limitation of the serde trait system
-                    Err(de::Error::custom(
-                        "Binary format detection requires using DataMap::from_bytes() method",
-                    ))
-                }
+                })
+            } else {
+                Err(de::Error::custom(format!(
+                    "unsupported DataMap version: {ver}",
+                    ver = versioned.version
+                )))
             }
         }
     }
@@ -322,10 +295,9 @@ impl Debug for ChunkInfo {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::{decrypt, encrypt, Error};
-    use bytes::Bytes;
 
     fn create_test_chunk_info(index: usize) -> ChunkInfo {
         ChunkInfo {
@@ -334,27 +306,6 @@ mod tests {
             src_hash: crate::hash::content_hash(format!("src_{index}").as_bytes()),
             src_size: 1024 * (index + 1),
         }
-    }
-
-    #[test]
-    fn test_deserialize_old_format_json() {
-        // Create JSON representing the old tuple struct format: just an array
-        let chunks = vec![
-            create_test_chunk_info(0),
-            create_test_chunk_info(1),
-            create_test_chunk_info(2),
-        ];
-        let old_format_json = serde_json::to_string(&chunks).unwrap();
-
-        // Deserialize as DataMap
-        let data_map: DataMap = serde_json::from_str(&old_format_json).unwrap();
-
-        // Verify the data was correctly deserialized
-        assert_eq!(data_map.chunk_identifiers.len(), 3);
-        assert_eq!(data_map.child, None); // Should default to None for old format
-        assert_eq!(data_map.chunk_identifiers[0].index, 0);
-        assert_eq!(data_map.chunk_identifiers[1].index, 1);
-        assert_eq!(data_map.chunk_identifiers[2].index, 2);
     }
 
     #[test]
@@ -409,24 +360,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bincode_old_format_compatibility() {
-        // Test that we can deserialize the old format (just Vec<ChunkInfo>)
-        let chunks = vec![create_test_chunk_info(0), create_test_chunk_info(1)];
-
-        // Simulate old format by encoding just the Vec
-        let old_format_bytes = bincode::serialize(&chunks).unwrap();
-
-        // Should successfully deserialize using from_bytes
-        let data_map = DataMap::from_bytes(&old_format_bytes).unwrap();
-
-        // Verify
-        assert_eq!(data_map.chunk_identifiers.len(), 2);
-        assert_eq!(data_map.child, None); // Old format has no child
-        assert_eq!(data_map.chunk_identifiers[0].index, 0);
-        assert_eq!(data_map.chunk_identifiers[1].index, 1);
-    }
-
-    #[test]
     fn test_bincode_version_byte() {
         // Verify that new format includes version byte
         let chunks = vec![create_test_chunk_info(0)];
@@ -465,231 +398,52 @@ mod tests {
     }
 
     #[test]
-    fn test_full_encryption_pipeline_with_old_format_data_map() {
-        // Create a data map in the old format (without child field)
-        let chunks = vec![
-            create_test_chunk_info(0),
-            create_test_chunk_info(1),
-            create_test_chunk_info(2),
-        ];
-
-        // Simulate old format serialization (just Vec<ChunkInfo>)
-        let old_format_bytes = bincode::serialize(&chunks).unwrap();
-
-        // Deserialize using the backward compatibility method
-        let data_map = DataMap::from_bytes(&old_format_bytes).unwrap();
-
-        // Verify it's correctly interpreted as old format
-        assert_eq!(data_map.child, None);
-        assert_eq!(data_map.chunk_identifiers.len(), 3);
-
-        // Now test the full encryption pipeline with this old format data map
-        let test_data = b"Hello, this is test data for encryption pipeline!";
-        let bytes = Bytes::from(test_data.to_vec());
-
-        // Encrypt the data
-        let (encrypted_data_map, encrypted_chunks) = encrypt(bytes.clone()).unwrap();
-
-        // Verify the encrypted data map has the new format
-        assert_eq!(encrypted_data_map.child, None); // Root data map
-
-        // Decrypt the data
-        let decrypted_bytes = decrypt(&encrypted_data_map, &encrypted_chunks).unwrap();
-
-        // Verify the decrypted data matches the original
-        assert_eq!(decrypted_bytes, bytes);
-    }
-
-    #[test]
-    fn test_shrink_and_expand_with_backward_compatibility() {
-        // Create a large data map that will need shrinking
-        let mut chunks = Vec::new();
-        for i in 0..10 {
-            chunks.push(create_test_chunk_info(i));
-        }
-
-        // Create old format data map
-        let old_format_bytes = bincode::serialize(&chunks).unwrap();
-        let data_map = DataMap::from_bytes(&old_format_bytes).unwrap();
-
-        // Simulate shrinking process (this would normally be done by shrink_data_map)
-        let mut storage = std::collections::HashMap::new();
-
-        // Encrypt the data map itself (simulating shrinking)
-        let data_map_bytes = data_map.to_bytes().unwrap();
-        let bytes = Bytes::from(data_map_bytes);
-        let (shrunk_data_map, shrunk_chunks) = encrypt(bytes).unwrap();
-
-        // Store the shrunk chunks
-        for chunk in &shrunk_chunks {
-            let _ = storage.insert(
-                crate::hash::content_hash(&chunk.content),
-                chunk.content.clone(),
-            );
-        }
-
-        // Verify the shrunk data map has the new format
-        // The encryption process creates a new data map without child (root level)
-        assert_eq!(shrunk_data_map.child, None); // Root level after encryption
-
-        // Now simulate expanding back to root (this would normally be done by get_root_data_map)
-        let _retrieve_fn = |hash: XorName| -> Result<Bytes, Error> {
-            storage
-                .get(&hash)
-                .cloned()
-                .ok_or_else(|| Error::Generic("Chunk not found".to_string()))
-        };
-
-        // Decrypt the shrunk data map to get back the original
-        let decrypted_bytes = decrypt(&shrunk_data_map, &shrunk_chunks).unwrap();
-        let recovered_data_map = DataMap::from_bytes(&decrypted_bytes).unwrap();
-
-        // Verify the recovered data map is the same as the original
-        assert_eq!(recovered_data_map.chunk_identifiers.len(), 10);
-        assert_eq!(recovered_data_map.child, None); // Should be back to old format
-    }
-
-    #[test]
-    fn test_mixed_format_serialization() {
-        // Test that we can handle mixed scenarios where some data maps are old format
-        // and others are new format in the same system
-
-        // Create old format data map
-        let old_chunks = vec![create_test_chunk_info(0), create_test_chunk_info(1)];
-        let old_format_bytes = bincode::serialize(&old_chunks).unwrap();
-        let old_data_map = DataMap::from_bytes(&old_format_bytes).unwrap();
-
-        // Create new format data map
-        let new_chunks = vec![create_test_chunk_info(2), create_test_chunk_info(3)];
-        let new_data_map = DataMap::with_child(new_chunks, 5);
-
-        // Serialize both
-        let old_serialized = old_data_map.to_bytes().unwrap();
-        let new_serialized = new_data_map.to_bytes().unwrap();
-
-        // Deserialize both
-        let old_deserialized = DataMap::from_bytes(&old_serialized).unwrap();
-        let new_deserialized = DataMap::from_bytes(&new_serialized).unwrap();
-
-        // Verify both work correctly
-        assert_eq!(old_deserialized.child, None);
-        assert_eq!(new_deserialized.child, Some(5));
-        assert_eq!(old_deserialized.chunk_identifiers.len(), 2);
-        assert_eq!(new_deserialized.chunk_identifiers.len(), 2);
-    }
-
-    #[test]
     fn test_error_handling_for_corrupted_data() {
-        // Test that corrupted data is handled gracefully
-
         // Test with completely invalid data
         let invalid_data = b"this is not valid bincode data";
-        let result = DataMap::from_bytes(invalid_data);
-        // This should fail, but let's be more flexible about the error type
-        if result.is_ok() {
-            println!("Warning: Invalid data was parsed successfully");
-        }
+        assert!(DataMap::from_bytes(invalid_data).is_err());
 
         // Test with partial data (truncated)
         let chunks = vec![create_test_chunk_info(0)];
-        let valid_bytes = bincode::serialize(&chunks).unwrap();
-        let truncated_bytes = &valid_bytes[..valid_bytes.len() - 5]; // Remove last 5 bytes
-        let result = DataMap::from_bytes(truncated_bytes);
-        // This should fail, but let's be more flexible about the error type
-        if result.is_ok() {
-            println!("Warning: Truncated data was parsed successfully");
+        let data_map = DataMap::new(chunks);
+        let valid_bytes = data_map.to_bytes().unwrap();
+        let truncated_bytes = &valid_bytes[..valid_bytes.len() - 5];
+        assert!(DataMap::from_bytes(truncated_bytes).is_err());
+
+        // Test with wrong version number
+        let mut wrong_version_data = valid_bytes.clone();
+        if let Some(first) = wrong_version_data.first_mut() {
+            *first = 99u8;
         }
-
-        // Test with wrong version number in new format
-        let wrong_version_data = {
-            let mut data = vec![99u8]; // Wrong version number
-            data.extend_from_slice(&bincode::serialize(&chunks).unwrap());
-            data
-        };
-        let result = DataMap::from_bytes(&wrong_version_data);
-        // This might succeed if bincode can still parse it as old format
-        // Let's just verify it doesn't panic
-        let _ = result;
-    }
-
-    #[test]
-    fn test_json_backward_compatibility_edge_cases() {
-        // Test edge cases for JSON backward compatibility
-
-        // Test empty chunk list in old format
-        let empty_chunks: Vec<ChunkInfo> = vec![];
-        let empty_json = serde_json::to_string(&empty_chunks).unwrap();
-        let empty_data_map: DataMap = serde_json::from_str(&empty_json).unwrap();
-        assert_eq!(empty_data_map.chunk_identifiers.len(), 0);
-        assert_eq!(empty_data_map.child, None);
-
-        // Test new format with missing child field (should default to None)
-        let chunks = vec![create_test_chunk_info(0)];
-        let partial_json = format!(
-            r#"{{"chunk_identifiers": {}}}"#,
-            serde_json::to_string(&chunks).unwrap()
-        );
-        let partial_data_map: DataMap = serde_json::from_str(&partial_json).unwrap();
-        assert_eq!(partial_data_map.chunk_identifiers.len(), 1);
-        assert_eq!(partial_data_map.child, None);
-
-        // Test new format with explicit null child
-        let explicit_null_json = format!(
-            r#"{{"chunk_identifiers": {}, "child": null}}"#,
-            serde_json::to_string(&chunks).unwrap()
-        );
-        let explicit_null_data_map: DataMap = serde_json::from_str(&explicit_null_json).unwrap();
-        assert_eq!(explicit_null_data_map.chunk_identifiers.len(), 1);
-        assert_eq!(explicit_null_data_map.child, None);
+        assert!(DataMap::from_bytes(&wrong_version_data).is_err());
     }
 
     #[test]
     fn test_bincode_version_byte_consistency() {
-        // Verify that the version byte is consistently used and can be detected
-
-        // Test new format always has version byte
         let chunks = vec![create_test_chunk_info(0)];
         let data_map = DataMap::new(chunks.clone());
         let bytes = data_map.to_bytes().unwrap();
 
-        // First byte should be version 1
         assert!(!bytes.is_empty());
         assert_eq!(bytes[0], 1u8);
 
-        // Test with child
         let data_map_with_child = DataMap::with_child(chunks, 42);
         let bytes_with_child = data_map_with_child.to_bytes().unwrap();
         assert_eq!(bytes_with_child[0], 1u8);
-
-        // Verify that old format doesn't start with version 1
-        let old_chunks = vec![create_test_chunk_info(0)];
-        let old_bytes = bincode::serialize(&old_chunks).unwrap();
-        // Note: The actual first byte depends on bincode's serialization format
-        // We just verify it's not empty and has some content
-        assert!(!old_bytes.is_empty());
     }
 
     #[test]
     fn test_round_trip_serialization_consistency() {
-        // Test that serialization and deserialization are consistent across formats
-
         let chunks = vec![create_test_chunk_info(0), create_test_chunk_info(1)];
 
-        // Test new format round trip
-        let new_data_map = DataMap::with_child(chunks.clone(), 3);
-        let new_bytes = new_data_map.to_bytes().unwrap();
-        let new_deserialized = DataMap::from_bytes(&new_bytes).unwrap();
-        assert_eq!(new_data_map, new_deserialized);
+        let data_map = DataMap::with_child(chunks.clone(), 3);
+        let bytes = data_map.to_bytes().unwrap();
+        let deserialized = DataMap::from_bytes(&bytes).unwrap();
+        assert_eq!(data_map, deserialized);
 
-        // Test old format round trip
-        let old_bytes = bincode::serialize(&chunks).unwrap();
-        let old_deserialized = DataMap::from_bytes(&old_bytes).unwrap();
-        let old_serialized = old_deserialized.to_bytes().unwrap();
-        let old_round_trip = DataMap::from_bytes(&old_serialized).unwrap();
-
-        // The old format should be converted to new format when re-serialized
-        assert_eq!(old_round_trip.chunk_identifiers, chunks);
-        assert_eq!(old_round_trip.child, None);
-        assert_eq!(old_serialized[0], 1u8); // Should now have version byte
+        let data_map_no_child = DataMap::new(chunks);
+        let bytes_no_child = data_map_no_child.to_bytes().unwrap();
+        let deserialized_no_child = DataMap::from_bytes(&bytes_no_child).unwrap();
+        assert_eq!(data_map_no_child, deserialized_no_child);
     }
 }
