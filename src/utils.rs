@@ -267,4 +267,90 @@ mod tests {
             "different child_level must produce different nonces"
         );
     }
+
+    #[test]
+    fn test_kdf_deterministic() {
+        let src = XorName([0x42; 32]);
+        let n1 = XorName([0xAA; 32]);
+        let n2 = XorName([0xBB; 32]);
+
+        let (pad_a, key_a, nonce_a) = get_pki(&src, &n1, &n2, 5, 2);
+        let (pad_b, key_b, nonce_b) = get_pki(&src, &n1, &n2, 5, 2);
+
+        assert_eq!(pad_a.0, pad_b.0, "same inputs must produce identical pads");
+        assert_eq!(key_a.0, key_b.0, "same inputs must produce identical keys");
+        assert_eq!(
+            nonce_a.0, nonce_b.0,
+            "same inputs must produce identical nonces"
+        );
+    }
+
+    #[test]
+    fn test_kdf_avalanche_single_bit_flip() {
+        let src_a = [0x42u8; 32];
+        let src_b = {
+            let mut b = src_a;
+            b[0] ^= 0x01; // flip one bit
+            b
+        };
+
+        let n1 = XorName([0xAA; 32]);
+        let n2 = XorName([0xBB; 32]);
+
+        let (pad_a, key_a, nonce_a) = get_pki(&XorName(src_a), &n1, &n2, 0, 0);
+        let (pad_b, key_b, nonce_b) = get_pki(&XorName(src_b), &n1, &n2, 0, 0);
+
+        // Count differing bytes — expect at least 30% differ (avalanche property)
+        let key_diff = key_a
+            .0
+            .iter()
+            .zip(key_b.0.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        let nonce_diff = nonce_a
+            .0
+            .iter()
+            .zip(nonce_b.0.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        let pad_diff = pad_a
+            .0
+            .iter()
+            .zip(pad_b.0.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+
+        assert!(
+            key_diff >= 10,
+            "expected at least 10/32 key bytes to differ, got {}",
+            key_diff
+        );
+        assert!(
+            nonce_diff >= 4,
+            "expected at least 4/12 nonce bytes to differ, got {}",
+            nonce_diff
+        );
+        assert!(
+            pad_diff >= 15,
+            "expected at least 15/52 pad bytes to differ, got {}",
+            pad_diff
+        );
+    }
+
+    #[test]
+    fn test_kdf_output_sizes() {
+        let src = XorName([0x01; 32]);
+        let n1 = XorName([0x02; 32]);
+        let n2 = XorName([0x03; 32]);
+
+        let (pad, key, nonce) = get_pki(&src, &n1, &n2, 0, 0);
+
+        assert_eq!(pad.0.len(), PAD_SIZE, "pad must be {PAD_SIZE} bytes");
+        assert_eq!(key.0.len(), KEY_SIZE, "key must be {KEY_SIZE} bytes");
+        assert_eq!(
+            nonce.0.len(),
+            NONCE_SIZE,
+            "nonce must be {NONCE_SIZE} bytes"
+        );
+    }
 }
