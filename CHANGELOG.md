@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 *When editing this file, please respect a line length of 100.*
 
+## [0.35.0] - 2026-03-13
+
+### Added
+- Post-quantum cryptography support.
+- BLAKE3-based KDF for nonce derivation, improving cryptographic safety.
+
+### Changed
+- Reduced MAX_CHUNK_SIZE to 4190208 bytes to provide compression headroom.
+- Child level is now threaded through DecryptionStream and used in KDF.
+- Improved Python binding docs and updated TypeScript type definitions.
+
+### Removed
+- Legacy v0 DataMap format support has been removed.
+- Removed several storage-coupled APIs from the public interface:
+  `encrypt_from_file`, `decrypt_from_storage`, `streaming_encrypt_from_file`,
+  `streaming_encrypt_datamaps_from_file`, and `streaming_decrypt_from_storage`.
+
+### Fixed
+- Improved error handling: eliminated swallowed errors and dead code.
+- Fixed boundary underflow test assertions to use local max_chunk_size.
+
 ## [0.34.3] - 2025-11-27
 
 ### Changed
